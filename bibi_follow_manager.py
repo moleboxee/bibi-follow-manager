@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "2.4.0"
+APP_VER = "2.5.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -1390,6 +1390,7 @@ main{flex:1; overflow-y:auto; padding:14px 16px 90px}
 .loglist div{padding:4px 0; border-bottom:1px solid var(--line)}
 .chglist{max-height:320px; overflow:auto; font-size:13px}
 .chglist div{padding:4px 0; border-bottom:1px solid var(--line)}
+#ctxMenu{position:fixed; min-width:160px; bottom:auto; left:0; top:0}
 #toasts{position:fixed; right:16px; bottom:16px; display:flex; flex-direction:column; gap:8px; z-index:120}
 .toast{background:var(--card2); border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:10px 14px; max-width:340px; animation:fadeIn .2s}
 .toast.err{border-left-color:var(--danger)}
@@ -1617,6 +1618,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
   </div>
 </div>
 <div id="toasts"></div>
+<div id="ctxMenu" class="dd-menu hidden"></div>
 
 <script>
 "use strict";
@@ -2678,6 +2680,58 @@ async function checkActiveSelected(){
   html += '<div style="color:var(--muted);font-size:12px;margin-top:6px">结果已缓存(24小时内不重复请求),卡片上会显示「📡 N天前投稿」徽章,清理向导里可按「距上次投稿超过 N 天」筛选。</div>';
   showModal('活跃度检测完成', html, [{label: '关闭'}]);
 }
+function copyText(t){
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(t).then(() => toast('已复制到剪贴板', 'ok'))
+      .catch(() => toast('复制失败', 'err'));
+  }
+  const ta = document.createElement('textarea');
+  ta.value = t; document.body.appendChild(ta); ta.select();
+  try{ document.execCommand('copy'); toast('已复制到剪贴板', 'ok'); }
+  catch(e){ toast('复制失败', 'err'); }
+  ta.remove();
+}
+function ctxAct(act, mid){
+  if (act === 'protect'){
+    if (state.protect.has(mid)) state.protect.delete(mid); else state.protect.add(mid);
+    saveProtect(); toast(state.protect.has(mid) ? '已加入保护名单' : '已取消保护', 'ok');
+    renderGrid();
+  } else if (act === 'copyuid'){ copyText(String(mid)); }
+  else if (act === 'copylink'){ copyText('https://space.bilibili.com/' + mid); }
+  else if (act === 'followback'){ followOne(mid); }
+  else if (act === 'unfollow'){
+    const u = state.list.find(x => x.mid === mid);
+    showModal('取关确认', '确定取消关注 <b>' + esc(u ? u.uname : mid) + '</b> 吗?' +
+      '<br><span style="color:var(--muted)">此操作无法撤销。</span>', [
+      {label: '取消'},
+      {label: '取关', cls: 'danger', keepOpen: true, onClick: async () => {
+        await batchWrite('/api/unfollow', [mid], '取关', applyRemoved);
+      }},
+    ]);
+  }
+}
+document.addEventListener('contextmenu', e => {
+  const card = e.target.closest('#grid .card');
+  const menu = $('#ctxMenu');
+  if (!card){ menu.classList.add('hidden'); return; }
+  e.preventDefault();
+  const mid = Number(card.dataset.mid);
+  const isF = state.view2 === 'fans';
+  const u = (isF ? state.fans : state.list).find(x => x.mid === mid);
+  if (!u) return;
+  const prot = state.protect.has(mid);
+  const items = [];
+  items.push('<button onclick="ctxAct(\'protect\',' + mid + ')">' +
+    (prot ? '🔓 取消保护' : '🔒 加入保护名单') + '</button>');
+  items.push('<button onclick="ctxAct(\'copyuid\',' + mid + ')">复制 UID</button>');
+  items.push('<button onclick="ctxAct(\'copylink\',' + mid + ')">复制主页链接</button>');
+  if (isF && !fanIsBack(u)) items.push('<button onclick="ctxAct(\'followback\',' + mid + ')">➕ 回关</button>');
+  if (!isF) items.push('<button onclick="ctxAct(\'unfollow\',' + mid + ')">✂ 取关此人</button>');
+  menu.innerHTML = items.join('');
+  menu.classList.remove('hidden');
+  menu.style.left = Math.min(e.clientX, window.innerWidth - 185) + 'px';
+  menu.style.top = Math.min(e.clientY, window.innerHeight - items.length * 38 - 8) + 'px';
+});
 function followBackSelected(){
   const mids = [...state.sel];
   if (!mids.length) return;
