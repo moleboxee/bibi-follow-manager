@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "2.9.0"
+APP_VER = "3.0.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
