@@ -38,7 +38,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.6.1"
+APP_VER = "1.6.2"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -1362,8 +1362,9 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
 const $ = s => document.querySelector(s);
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtDate(ts){ return ts ? new Date(ts*1000).toLocaleDateString('zh-CN') : '-'; }
-function isMutual(u){ return u.attribute === 2 || u.attribute === 6; }
-function fanIsBack(u){ return u.attribute === 2 || u.attribute === 6; }
+/* 关系属性(bilibili-API-collect): 2=已关注(单向) 6=已互粉 0=未关注 128=已拉黑 */
+function isMutual(u){ return u.attribute === 6; }
+function fanIsBack(u){ return u.attribute === 6; }
 function toast(msg, type){
   const d = document.createElement('div');
   d.className = 'toast' + (type ? ' ' + type : '');
@@ -2175,7 +2176,7 @@ function applyRemoved(okMids){
 function followOne(mid){
   api('/api/follow', {mids: [mid]}, 'POST').then(() => {
     const u = state.fans.find(x => x.mid === mid);
-    if (u) u.attribute = 2;
+    if (u) u.attribute = 6;
     renderFanSidebar(); renderGrid(); renderStats();
     toast('回关成功', 'ok');
   }).catch(e => toast(e.message, 'err'));
@@ -2191,7 +2192,7 @@ function followBackSelected(){
     {label: '确认回关', cls: 'primary', keepOpen: true, onClick: async () => {
       await batchWrite('/api/follow', mids, '回关', (ok) => {
         const s = new Set(ok);
-        state.fans.forEach(u => { if (s.has(u.mid)) u.attribute = 2; });
+        state.fans.forEach(u => { if (s.has(u.mid)) u.attribute = 6; });
         ok.forEach(m => state.sel.delete(m));
         renderFanSidebar(); renderGrid(); renderStats();
       });
