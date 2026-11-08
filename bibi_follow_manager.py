@@ -36,7 +36,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.1.0"
+APP_VER = "1.2.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(ROOT, "bibi_data.json")
 START_PORT = 8410
@@ -881,6 +881,8 @@ main{flex:1; overflow-y:auto; padding:14px 16px 90px}
 #modal h3{margin-bottom:10px; font-size:16px}
 #modalBody{color:var(--text); margin-bottom:16px; word-break:break-all}
 #modalBtns{display:flex; gap:10px; justify-content:flex-end}
+.pbar{height:8px; background:var(--card2); border-radius:4px; overflow:hidden; margin:10px 0}
+.pbar i{display:block; height:100%; background:var(--accent); border-radius:4px; transition:width .3s}
 #toasts{position:fixed; right:16px; bottom:16px; display:flex; flex-direction:column; gap:8px; z-index:120}
 .toast{background:var(--card2); border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:10px 14px; max-width:340px; animation:fadeIn .2s}
 .toast.err{border-left-color:var(--danger)}
@@ -1028,7 +1030,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
           <button id="btnSaveSet" class="primary">保存设置</button>
           <h3>关于</h3>
           <div class="about">
-            BIBI 关注管理器 v1.1.0 · 哔哩哔哩关注/粉丝管理工具<br>
+            BIBI 关注管理器 v1.2.0 · 哔哩哔哩关注/粉丝管理工具<br>
             数据文件:脚本同目录 bibi_data.json(含登录 Cookie,请勿外传)<br>
             「移入分组」为把用户加入目标分组,B站允许一人属于多个分组<br>
             仅供个人学习交流,请勿用于批量营销等违反B站用户协议的场景
@@ -1094,13 +1096,12 @@ function showModal(title, html, buttons){
     const el = document.createElement('button');
     el.textContent = b.label;
     el.className = b.cls || '';
-    el.onclick = async () => { if (modalBusy) return; if (b.onClick) { modalBusy = true; try { await b.onClick(); } finally { modalBusy = false; } } closeModal(); };
+    el.onclick = async () => { if (modalBusy) return; if (b.onClick) { modalBusy = true; try { await b.onClick(); } finally { modalBusy = false; } } if (!b.keepOpen) closeModal(); };
     bt.appendChild(el);
   });
   $('#modalMask').classList.remove('hidden');
 }
 function closeModal(){ $('#modalMask').classList.add('hidden'); }
-function modalLoading(title){ showModal(title, '处理中,请稍候(批量操作已自动限速)…', []); }
 
 /* ===================== API ===================== */
 async function api(path, body, method){
@@ -1576,21 +1577,74 @@ function namesPreview(mids){
     return u ? esc(u.uname) : m;
   }).join('、');
 }
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+let batchAbort = false;
+/* 前端分批驱动:实时进度条 + 可随时停止 + 风控暂停后保留勾选以便重试 */
+async function batchWrite(path, mids, verb, applyOk){
+  const size = Math.max(1, parseInt(state.settings.batch_size) || 10);
+  const delay = Math.max(200, (parseFloat(state.settings.batch_delay) || 1) * 1000);
+  const total = mids.length;
+  let done = 0, fail = [], stopped = false, note = '';
+  batchAbort = false;
+  const render = () => {
+    const pct = total ? Math.round(done / total * 100) : 100;
+    $('#modalBody').innerHTML =
+      '<div class="pbar"><i style="width:' + pct + '%"></i></div>' +
+      '<div style="color:var(--muted);font-size:13px">' + verb + '中 ' + done + ' / ' + total +
+      (fail.length ? ' · <span style="color:var(--danger)">失败 ' + fail.length + '</span>' : '') +
+      '</div>' + (note ? '<div style="color:var(--warn);font-size:12px;margin-top:8px">' + note + '</div>' : '');
+  };
+  showModal(verb, '', [
+    {label: '停止', keepOpen: true, onClick: async () => { batchAbort = true; }},
+  ]);
+  render();
+  for (let i = 0; i < total; i += size){
+    if (batchAbort){ stopped = true; note = '已手动停止,未处理的用户仍保持勾选。'; break; }
+    const ch = mids.slice(i, i + size);
+    try{
+      const r = await api(path, {mids: ch}, 'POST');
+      applyOk(r.ok_mids || []);
+      done += (r.ok_mids || []).length;
+      if (r.fail && r.fail.length){
+        fail.push(...r.fail);
+        if (/风控/.test(r.fail[0].msg || '')){
+          stopped = true;
+          note = '已触发B站风控,剩余操作已暂停(未处理的用户仍保持勾选,可稍后重试)。';
+          break;
+        }
+      }
+    }catch(e){
+      fail.push({mids: ch, msg: e.message});
+      if (/风控|登录/.test(e.message)){
+        stopped = true; note = esc(e.message) + '(未处理的用户仍保持勾选)';
+        break;
+      }
+    }
+    render();
+    if (i + size < total) await sleep(delay);
+  }
+  render();
+  let html = '<div style="font-size:14px;margin-top:4px">完成:<b style="color:var(--ok)">' + done + '</b> 人成功' +
+    (fail.length ? ',<b style="color:var(--danger)">' + fail.length + '</b> 人失败' : '') + '</div>';
+  if (note) html += '<div style="color:var(--warn);font-size:12px;margin-top:8px">' + note + '</div>';
+  if (fail.length) html += '<div style="color:var(--muted);font-size:12px;margin-top:6px;word-break:break-all">' + esc(fail[0].msg) + '</div>';
+  showModal(verb + '完成', html, [{label: '关闭'}]);
+}
 function unfollowSelected(){
   const mids = [...state.sel];
   if (!mids.length) return;
+  const nMutual = mids.filter(m => {
+    const u = state.list.find(x => x.mid === m);
+    return u && isMutual(u);
+  }).length;
   showModal('批量取关确认',
     '即将取消关注 <b style="color:var(--danger)">' + mids.length + '</b> 位用户,此操作无法批量撤销!<br><br>' +
-    '<span style="color:var(--muted)">' + namesPreview(mids) + (mids.length > 8 ? ' 等' : '') + '</span><br><br>' +
-    '<span style="color:var(--muted)">程序将按设置自动分批限速执行。</span>', [
+    '<span style="color:var(--muted)">' + namesPreview(mids) + (mids.length > 8 ? ' 等' : '') + '</span>' +
+    (nMutual ? '<br><br><span style="color:var(--warn)">⚠ 其中有 ' + nMutual + ' 位互粉用户,请确认真的要取关。</span>' : '') +
+    '<br><span style="color:var(--muted)">按设置(每批 ' + state.settings.batch_size + ' 人 / 间隔 ' + state.settings.batch_delay + ' 秒)执行,可看实时进度、随时停止。</span>', [
     {label: '再想想'},
-    {label: '确认取关', cls: 'danger', onClick: async () => {
-      modalLoading('取关中');
-      try{
-        const r = await api('/api/unfollow', {mids}, 'POST');
-        applyRemoved(r.ok_mids);
-        toast('已取关 ' + r.ok_mids.length + ' 人' + (r.fail.length ? ',失败:' + r.fail[0].msg : ''), r.fail.length ? 'err' : 'ok');
-      }catch(e){ toast(e.message, 'err'); }
+    {label: '确认取关', cls: 'danger', keepOpen: true, onClick: async () => {
+      await batchWrite('/api/unfollow', mids, '取关', applyRemoved);
     }},
   ]);
 }
@@ -1616,18 +1670,16 @@ function followBackSelected(){
   if (!mids.length) return;
   showModal('批量回关确认',
     '即将关注 <b style="color:var(--accent2)">' + mids.length + '</b> 位粉丝。<br><br>' +
-    '<span style="color:var(--muted)">' + namesPreview(mids) + (mids.length > 8 ? ' 等' : '') + '</span>', [
+    '<span style="color:var(--muted)">' + namesPreview(mids) + (mids.length > 8 ? ' 等' : '') + '</span>' +
+    '<br><span style="color:var(--muted)">按设置自动分批限速执行,可看实时进度。</span>', [
     {label: '取消'},
-    {label: '确认回关', cls: 'primary', onClick: async () => {
-      modalLoading('回关中');
-      try{
-        const r = await api('/api/follow', {mids}, 'POST');
-        const okSet = new Set(r.ok_mids);
-        state.fans.forEach(u => { if (okSet.has(u.mid)) u.attribute = 2; });
-        r.ok_mids.forEach(m => state.sel.delete(m));
+    {label: '确认回关', cls: 'primary', keepOpen: true, onClick: async () => {
+      await batchWrite('/api/follow', mids, '回关', (ok) => {
+        const s = new Set(ok);
+        state.fans.forEach(u => { if (s.has(u.mid)) u.attribute = 2; });
+        ok.forEach(m => state.sel.delete(m));
         renderFanSidebar(); renderGrid(); renderStats();
-        toast('已回关 ' + r.ok_mids.length + ' 人' + (r.fail.length ? ',失败:' + r.fail[0].msg : ''), r.fail.length ? 'err' : 'ok');
-      }catch(e){ toast(e.message, 'err'); }
+      });
     }},
   ]);
 }
