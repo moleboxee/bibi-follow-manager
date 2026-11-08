@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "3.1.0"
+APP_VER = "3.2.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -92,6 +92,11 @@ QRCODE_JS = base64.b64decode(QRCODE_JS_B64).decode("utf-8") if QRCODE_JS_B64 els
 DEFAULT_SETTINGS = {"theme": "dark", "accent": "pink", "min_to_tray": False,
                     "notify": True, "autostart": False, "daily_limit": 300,
                     "batch_size": 10, "batch_delay": 1.0}
+
+
+def derive_mixin_key(raw_wbi_key):
+    """从 img_key+sub_key 原始串按置换表推导 mixin_key(纯函数,便于测试)。"""
+    return "".join(raw_wbi_key[i] for i in MIXIN_KEY_ENC_TAB if i < len(raw_wbi_key))[:32]
 
 
 class BiliError(Exception):
@@ -169,7 +174,8 @@ class Bili:
     def req(self, method, url, params=None, data=None,
             referer="https://www.bilibili.com/"):
         if params:
-            url = url + "?" + urllib.parse.urlencode(params)
+            # 与 WBI 签名保持同一编码(空格=%20,十六进制大写),避免签名不一致
+            url = url + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
         body = None
         headers = {
             "User-Agent": UA,
@@ -234,7 +240,7 @@ class Bili:
                    + os.path.basename(wbi.get("sub_url", "")).split(".")[0])
         if not raw_key:
             raise BiliError("获取 WBI 密钥失败")
-        mixin = "".join(raw_key[i] for i in MIXIN_KEY_ENC_TAB if i < len(raw_key))[:32]
+        mixin = derive_mixin_key(raw_key)
         self._wbi = (mixin, time.time())
         return mixin
 

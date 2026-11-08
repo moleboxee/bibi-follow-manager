@@ -19,5 +19,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: 语法检查
         run: python -m py_compile bibi_follow_manager.py
+      - name: 单元测试
+        run: python tests/test_core.py
       - name: 模块加载检查(验证内嵌资源完整)
         run: python -c "import ast,io; ast.parse(io.open('bibi_follow_manager.py', encoding='utf-8').read()); print('AST OK')"
