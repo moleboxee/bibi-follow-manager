@@ -444,7 +444,7 @@ class Bili:
           has_content=False 确认既无视频也无动态(真·死号)
           has_content=None  无法确定(接口失败/内容不可见)
         """
-        has_content = None
+        arc_ok = False
         # 1) 投稿视频
         try:
             d = self.api_maybe_wbi(
@@ -454,7 +454,7 @@ class Bili:
             lst = ((d or {}).get("list") or {}).get("vlist") or []
             if lst:
                 return (lst[0].get("created", 0) or None), True
-            has_content = False  # 无视频,继续看动态
+            arc_ok = True  # 确认无视频,继续看动态
         except BiliError as e:
             if e.code in (-412, -352):
                 raise
@@ -473,7 +473,7 @@ class Bili:
                 except (KeyError, IndexError, TypeError):
                     ts = None
                 return (ts or None), True
-            return None, False  # 确认无视频无动态
+            return None, (False if arc_ok else None)  # 动态也为空:仅当视频阶段确认过才判"无内容"
         except BiliError as e:
             if e.code in (-412, -352):
                 raise
@@ -1727,7 +1727,7 @@ function showModal(title, html, buttons){
     const el = document.createElement('button');
     el.textContent = b.label;
     el.className = b.cls || '';
-    el.onclick = async () => { if (modalBusy) return; if (b.onClick) { modalBusy = true; try { await b.onClick(); } finally { modalBusy = false; } } if (!b.keepOpen) closeModal(); };
+    el.onclick = async () => { if (modalBusy && !b.bypassBusy) return; if (b.onClick) { modalBusy = true; try { await b.onClick(); } finally { modalBusy = false; } } if (!b.keepOpen) closeModal(); };
     bt.appendChild(el);
   });
   $('#modalMask').classList.remove('hidden');
@@ -2705,8 +2705,9 @@ async function batchWrite(path, mids, verb, applyOk){
       '</div>' + (note ? '<div style="color:var(--warn);font-size:12px;margin-top:8px">' + note + '</div>' : '');
   };
   showModal(verb, '', [
-    {label: '停止', keepOpen: true, onClick: async () => { batchAbort = true; }},
+    {label: '停止', keepOpen: true, bypassBusy: true, onClick: async () => { batchAbort = true; }},
   ]);
+  modalBusy = false;  // 释放确认按钮占用的忙锁,让「停止」可以点击
   render();
   for (let i = 0; i < total; i += size){
     if (batchAbort){ stopped = true; note = '已手动停止,未处理的用户仍保持勾选。'; break; }
@@ -3272,6 +3273,18 @@ def main():
         sys.stdout.reconfigure(errors="replace")
     except Exception:
         pass
+    no_browser = os.environ.get("BIBI_NO_BROWSER") == "1"
+    # 单实例:已有实例在跑时,直接给它开一个新窗口,不再起第二个服务
+    # (放在创建服务器之前,避免横幅地址误导)
+    if not no_browser:
+        existing = probe_existing()
+        if existing:
+            url0 = "http://127.0.0.1:%d" % existing
+            print("  检测到程序已在运行(端口 %d),直接打开新窗口" % existing)
+            if try_native_window(url0):
+                return
+            webbrowser.open(url0)
+            return
     bili = Bili()
     bili.load()
     bili.settings["autostart"] = _autostart_enabled()  # 以注册表实际状态为准
@@ -3286,17 +3299,6 @@ def main():
     print("  数据文件: %s" % DATA_FILE)
     print("  关闭窗口或按 Ctrl+C 即可退出程序")
     print("=" * 52)
-    no_browser = os.environ.get("BIBI_NO_BROWSER") == "1"
-    # 单实例:已有实例在跑时,直接给它开一个新窗口,不再起第二个服务
-    if not no_browser:
-        existing = probe_existing()
-        if existing:
-            url0 = "http://127.0.0.1:%d" % existing
-            print("  检测到程序已在运行(端口 %d),直接打开新窗口" % existing)
-            if try_native_window(url0):
-                return
-            webbrowser.open(url0)
-            return
     threading.Thread(target=auto_check_loop, daemon=True).start()
     if not no_browser and os.environ.get("BIBI_FORCE_BROWSER") != "1":
         if try_native_window(url, srv=srv,
