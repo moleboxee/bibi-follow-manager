@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "2.1.0"
+APP_VER = "2.2.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -620,6 +620,9 @@ def rebuild_cache(bili):
             diff = diff_relation(snap["followings"], _mini_users(lst),
                                  _ops.get("unfollowed_mids", {}),
                                  _ops.get("followed_mids", {}))
+            # 自己通过本工具做的取关/回关不算"变化"(批量操作时已有 toast 确认)
+            diff["removed"] = [r for r in diff.get("removed", []) if r.get("reason") != "you"]
+            diff["added"] = [a for a in diff.get("added", []) if a.get("reason") != "you"]
         else:
             diff = {"added": [], "removed": [], "renamed": []}
         snap["followings"] = _mini_users(lst)
@@ -769,6 +772,7 @@ def auto_check_loop():
     """
     time.sleep(600)
     while True:
+        apply_titlebar_theme()  # 跟随系统主题变化(auto 模式)
         bili = STATE.get("bili")
         if bili and bili.cookies.get("SESSDATA"):
             try:
@@ -955,6 +959,7 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     raise BiliError("间隔需为 0-10 的数字")
             bili.save()
+            apply_titlebar_theme()  # 主题变化时同步标题栏颜色
             return dict(bili.settings)
 
         if method == "POST" and path == "/api/login/qr/start":
@@ -2770,6 +2775,46 @@ def _icon_path():
     return os.path.join(ROOT, "app.ico")
 
 
+def is_system_dark():
+    """读取 Windows「应用使用浅色主题」注册表设置。"""
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            v, _ = winreg.QueryValueEx(k, "AppsUseLightTheme")
+            return v == 0
+    except OSError:
+        return True
+
+
+def apply_titlebar_theme():
+    """把标题栏颜色同步为当前主题(DWM 原生深色标题栏,Win10 20H1+/Win11)。"""
+    win = STATE.get("win")
+    bili = STATE.get("bili")
+    if not win or not bili or os.name != "nt":
+        return
+    try:
+        import ctypes
+        theme = bili.settings.get("theme", "dark")
+        dark = (theme == "dark") or (theme == "auto" and is_system_dark())
+        hwnd = ctypes.windll.user32.FindWindowW(None, "BIBI 关注管理器")
+        if not hwnd:
+            return
+        val = ctypes.c_int(1 if dark else 0)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 20, ctypes.byref(val), 4)  # DWMWA_USE_IMMERSIVE_DARK_MODE
+        if dark:
+            color = ctypes.c_uint(0x00202020)  # COLORREF 0x00BBGGRR 深灰
+        else:
+            color = ctypes.c_uint(0x00FFFFFF)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 35, ctypes.byref(color), 4)  # DWMWA_CAPTION_COLOR(Win11)
+    except Exception:
+        pass
+
+
 def _setup_tray(win, on_show):
     """系统托盘图标(失败静默跳过)。"""
     try:
@@ -2846,6 +2891,7 @@ def try_native_window(url, srv=None, test_mode=False):
             threading.Timer(4.0, win.destroy).start()
         else:
             STATE["tray"] = _setup_tray(win, show_main)
+            threading.Timer(2.0, apply_titlebar_theme).start()
         webview.start()
         return True
     except Exception:
