@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.6.3"
+APP_VER = "1.7.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -1140,7 +1140,7 @@ main{flex:1; overflow-y:auto; padding:14px 16px 90px}
 #modalMask{position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:100}
 #modal{width:400px; max-width:92vw; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px}
 #modal h3{margin-bottom:10px; font-size:16px}
-#modalBody{color:var(--text); margin-bottom:16px; word-break:break-all}
+#modalBody{color:var(--text); margin-bottom:16px; word-break:break-all; max-height:62vh; overflow:auto}
 #modalBtns{display:flex; gap:10px; justify-content:flex-end}
 .pbar{height:8px; background:var(--card2); border-radius:4px; overflow:hidden; margin:10px 0}
 .pbar i{display:block; height:100%; background:var(--accent); border-radius:4px; transition:width .3s}
@@ -1754,16 +1754,35 @@ function showChanges(){
 
 /* ===================== 按条件选择(清理向导) ===================== */
 function condMatch(){
+  const rel = $('#cdRel') ? $('#cdRel').value : 'all';
+  const sp = $('#cdSpecial') ? $('#cdSpecial').value : 'all';
+  const grp = $('#cdGroup') ? $('#cdGroup').value : 'all';
   const dEl = $('#cdDays');
   const day = dEl ? (parseInt(dEl.value, 10) || 0) : 0;
+  const capEl = $('#cdCap');
+  const cap = capEl ? (parseInt(capEl.value, 10) || 0) : 0;
+  const inc = ($('#cdInc') && $('#cdInc').value.trim().toLowerCase()) || '';
+  const exc = ($('#cdExc') && $('#cdExc').value.trim().toLowerCase()) || '';
+  const nosig = !!( $('#cdNoSig') && $('#cdNoSig').checked );
   const cut = Date.now() / 1000 - day * 86400;
-  return state.list.filter(u => {
-    if ($('#cdOneway') && $('#cdOneway').checked && isMutual(u)) return false;
-    if ($('#cdNoSpecial') && $('#cdNoSpecial').checked && u.special === 1) return false;
-    if ($('#cdUngroup') && $('#cdUngroup').checked && userTags(u.mid).some(t => t > 0)) return false;
+  let arr = state.list.filter(u => {
+    const mutual = isMutual(u);
+    if (rel === 'oneway' && mutual) return false;
+    if (rel === 'mutual' && !mutual) return false;
+    if (sp === 'yes' && u.special !== 1) return false;
+    if (sp === 'no' && u.special === 1) return false;
+    const tags = userTags(u.mid).filter(t => t > 0);
+    if (grp === 'none'){ if (tags.length) return false; }
+    else if (grp !== 'all'){ if (!tags.includes(Number(grp))) return false; }
     if (day > 0 && u.mtime > cut) return false;
+    if (nosig && (u.sign || '').trim()) return false;
+    const hay = (u.uname + ' ' + (u.sign || '')).toLowerCase();
+    if (inc && !hay.includes(inc)) return false;
+    if (exc && hay.includes(exc)) return false;
     return true;
   });
+  if (cap > 0) arr = arr.slice(0, cap);  // 按当前排序取前 N 个
+  return arr;
 }
 function condApply(){
   const mids = condMatch().map(u => u.mid);
@@ -1772,15 +1791,28 @@ function condApply(){
   return mids.length;
 }
 function condModal(){
+  if (state.view2 === 'fans') switchView('follows');
   if (!state.list.length) return toast('请先加载关注数据', 'err');
   showModal('按条件选择(清理向导)',
-    '<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px">' +
-    '<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="cdOneway" checked> 仅单向关注(对方没回粉)</label>' +
-    '<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="cdNoSpecial" checked> 排除特别关注</label>' +
-    '<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="cdUngroup"> 仅未分组用户</label>' +
-    '</div>' +
-    '<div class="set-row"><label style="width:120px">关注超过(天)</label><input type="number" id="cdDays" value="0" min="0" style="width:90px"><span style="color:var(--muted);font-size:12px">填 0 表示不限</span></div>' +
-    '<div style="color:var(--muted);font-size:13px">将勾选匹配的 <b id="cdCount" style="color:var(--accent2)">0</b> 人(只帮你勾选,不会直接取关,请核对后执行)</div>', [
+    '<div class="set-row"><label style="width:110px">关注关系</label>' +
+    '<select id="cdRel"><option value="all">全部</option><option value="oneway" selected>仅单向(没回粉)</option><option value="mutual">仅互粉</option></select></div>' +
+    '<div class="set-row"><label style="width:110px">特别关注</label>' +
+    '<select id="cdSpecial"><option value="all">不限</option><option value="no" selected>排除特别</option><option value="yes">仅特别</option></select></div>' +
+    '<div class="set-row"><label style="width:110px">所属分组</label>' +
+    '<select id="cdGroup"><option value="all">不限</option><option value="none">仅未分组</option>' +
+    state.tags.map(t => '<option value="' + t.tagid + '">' + esc(t.name) + '</option>').join('') +
+    '</select></div>' +
+    '<div class="set-row"><label style="width:110px">关注超过</label>' +
+    '<input type="number" id="cdDays" value="0" min="0" style="width:80px"><span style="color:var(--muted);font-size:12px">天(0=不限)</span></div>' +
+    '<div class="set-row"><label style="width:110px">包含关键词</label>' +
+    '<input type="text" id="cdInc" placeholder="昵称或签名包含才选,留空不限" style="flex:1"></div>' +
+    '<div class="set-row"><label style="width:110px">排除关键词</label>' +
+    '<input type="text" id="cdExc" placeholder="昵称或签名包含则排除" style="flex:1"></div>' +
+    '<div class="set-row"><label style="width:110px">其他</label>' +
+    '<label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="cdNoSig"> 仅无签名用户(多为普通账号)</label></div>' +
+    '<div class="set-row"><label style="width:110px">勾选上限</label>' +
+    '<input type="number" id="cdCap" value="0" min="0" style="width:80px"><span style="color:var(--muted);font-size:12px">人(0=不限;按当前排序取前 N 个)</span></div>' +
+    '<div style="color:var(--muted);font-size:13px;border-top:1px solid var(--line);padding-top:10px">将勾选匹配的 <b id="cdCount" style="color:var(--accent2)">0</b> 人(只帮你勾选,不会直接取关,请核对后执行)</div>', [
     {label: '取消'},
     {label: '勾选匹配用户', cls: 'primary', onClick: () => {
       const n = condApply();
