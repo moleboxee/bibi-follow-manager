@@ -1,0 +1,10 @@
+# 登录凭据,绝不提交
+bibi_data.json
+
+# 构建临时文件
+vendor_tmp/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec

@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.8", "3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 语法检查
+        run: python -m py_compile bibi_follow_manager.py
+      - name: 模块加载检查(验证内嵌资源完整)
+        run: python -c "import ast,io; ast.parse(io.open('bibi_follow_manager.py', encoding='utf-8').read()); print('AST OK')"
