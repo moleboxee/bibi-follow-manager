@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.9.0"
+APP_VER = "2.0.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -89,7 +89,8 @@ QRCODE_JS_B64 = "Ly8tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0
 QRCODE_JS = base64.b64decode(QRCODE_JS_B64).decode("utf-8") if QRCODE_JS_B64 else ""
 
 DEFAULT_SETTINGS = {"theme": "dark", "accent": "pink", "min_to_tray": False,
-                    "notify": True, "batch_size": 10, "batch_delay": 1.0}
+                    "notify": True, "autostart": False,
+                    "batch_size": 10, "batch_delay": 1.0}
 
 
 class BiliError(Exception):
@@ -122,6 +123,7 @@ class Bili:
             self.settings["accent"] = s.get("accent", "pink")
             self.settings["min_to_tray"] = bool(s.get("min_to_tray", False))
             self.settings["notify"] = bool(s.get("notify", True))
+            self.settings["autostart"] = bool(s.get("autostart", False))
             try:
                 self.settings["batch_size"] = min(50, max(1, int(s.get("batch_size", 10))))
             except (TypeError, ValueError):
@@ -715,9 +717,9 @@ def _ver_tuple(v):
         return ()
 
 
-def check_update():
+def check_update(force=False):
     now = time.time()
-    if UPDATE_CACHE["latest"] and now - UPDATE_CACHE["ts"] < 3600:
+    if not force and UPDATE_CACHE["latest"] and now - UPDATE_CACHE["ts"] < 3600:
         return UPDATE_CACHE["latest"]
     try:
         req = urllib.request.Request(
@@ -796,6 +798,47 @@ def auto_check_loop():
             except Exception:
                 pass
         time.sleep(3600)
+
+
+# ---------- 开机自启动(Windows 注册表 HKCU Run) ----------
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_NAME = "BIBI-Follow-Manager"
+
+
+def _autostart_enabled():
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_READ) as k:
+            winreg.QueryValueEx(k, _RUN_NAME)
+            return True
+    except OSError:
+        return False
+
+
+def _autostart(enable):
+    if os.name != "nt":
+        raise BiliError("仅支持 Windows")
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            if enable:
+                if getattr(sys, "frozen", False):
+                    cmd = '"%s"' % os.path.abspath(sys.executable)
+                else:
+                    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+                    if not os.path.exists(pyw):
+                        pyw = sys.executable
+                    cmd = '"%s" "%s"' % (pyw, os.path.abspath(__file__))
+                winreg.SetValueEx(k, _RUN_NAME, 0, winreg.REG_SZ, cmd)
+            else:
+                try:
+                    winreg.DeleteValue(k, _RUN_NAME)
+                except FileNotFoundError:
+                    pass
+    except OSError as e:
+        raise BiliError("注册表写入失败: %s" % e)
 
 
 # ---------- 本地 HTTP 服务 ----------
@@ -894,6 +937,11 @@ class Handler(BaseHTTPRequestHandler):
                 bili.settings["min_to_tray"] = bool(b.get("min_to_tray"))
             if "notify" in b:
                 bili.settings["notify"] = bool(b.get("notify"))
+            if "autostart" in b:
+                want = bool(b.get("autostart"))
+                if want != _autostart_enabled():
+                    _autostart(want)
+                bili.settings["autostart"] = want
             if "batch_size" in b:
                 try:
                     bili.settings["batch_size"] = min(50, max(1, int(b["batch_size"])))
@@ -1003,7 +1051,7 @@ class Handler(BaseHTTPRequestHandler):
                 return {"mid": mid, "last_ts": None, "has_content": None, "err": str(e)}
 
         if method == "GET" and path == "/api/update":
-            latest = check_update()
+            latest = check_update(force=bool(q.get("force")))
             return {"current": APP_VER, "latest": latest,
                     "has_new": bool(latest) and _ver_tuple(latest) > _ver_tuple(APP_VER)}
 
@@ -1320,6 +1368,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
         <div class="stat"><b id="stTotal">0</b><span>关注</span></div>
         <div class="stat"><b id="stMutual">0</b><span>互粉</span><span class="rate" id="stRate"></span></div>
         <div class="stat"><b id="stSpecial">0</b><span>特别关注</span></div>
+        <div class="stat"><b id="stDead">0</b><span>已注销</span></div>
         <div class="stat"><b id="stFans">—</b><span>粉丝</span></div>
         <div class="stat"><b id="stMonth">0</b><span>近30天新增</span></div>
         <span style="color:var(--muted);font-size:11px;margin-left:auto">关注趋势</span>
@@ -1395,6 +1444,14 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
             </select>
           </div>
           <div class="hint">窗口最小化到托盘期间,自动检查发现取关/掉粉时弹系统气泡通知。</div>
+          <div class="set-row">
+            <label>开机自启动</label>
+            <select id="setAuto">
+              <option value="off">关闭</option>
+              <option value="on">开启</option>
+            </select>
+          </div>
+          <div class="hint">写入当前用户注册表 Run 项,登录 Windows 后自动启动本程序(建议配合「最小化到托盘」)。</div>
           <h3>批量操作(防风控)</h3>
           <div class="set-row">
             <label>每批人数</label>
@@ -1420,6 +1477,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
           <div class="about">
             BIBI 关注管理器 v__VER__ · 哔哩哔哩关注/粉丝管理工具<br>
             <div id="updLine" style="margin-top:4px"></div>
+            <div style="margin-top:8px"><button class="ghost" onclick="loadUpdate(true)">立即检查更新</button></div>
             数据文件:脚本同目录 bibi_data.json(含登录 Cookie,请勿外传)<br>
             「移入分组」为把用户加入目标分组,B站允许一人属于多个分组<br>
             仅供个人学习交流,请勿用于批量营销等违反B站用户协议的场景
@@ -1959,7 +2017,7 @@ function condModal(){
     state.tags.map(t => '<option value="' + t.tagid + '">' + esc(t.name) + '</option>').join('') +
     '</select></div>' +
     '<div class="set-row"><label style="width:110px">注销账号</label>' +
-    '<select id="cdDead"><option value="all">不限</option><option value="yes" selected>仅已注销</option><option value="no">排除已注销</option></select></div>' +
+    '<select id="cdDead"><option value="all" selected>不限</option><option value="yes">仅已注销</option><option value="no">排除已注销</option></select></div>' +
     '<div class="set-row"><label style="width:110px">关注超过</label>' +
     '<input type="number" id="cdDays" value="0" min="0" style="width:80px"><span style="color:var(--muted);font-size:12px">天(0=不限)</span></div>' +
     '<div class="set-row"><label style="width:110px">包含关键词</label>' +
@@ -2066,6 +2124,7 @@ function renderStats(){
   $('#stMutual').textContent = mutual;
   $('#stRate').textContent = n ? '(' + Math.round(mutual * 100 / n) + '%)' : '';
   $('#stSpecial').textContent = L.filter(u => u.special === 1).length;
+  $('#stDead').textContent = L.filter(u => u.deactivated === 1).length;
   $('#stFans').textContent = state.stat.follower || state.fansTotal || '—';
   const cut = Date.now() / 1000 - 30 * 86400;
   $('#stMonth').textContent = L.filter(u => u.mtime >= cut).length;
@@ -2356,17 +2415,31 @@ async function batchWrite(path, mids, verb, applyOk){
   if (fail.length) html += '<div style="color:var(--muted);font-size:12px;margin-top:6px;word-break:break-all">' + esc(fail[0].msg) + '</div>';
   showModal(verb + '完成', html, [{label: '关闭'}]);
 }
-function unfollowSelected(){
+async function unfollowSelected(){
   const mids = [...state.sel];
   if (!mids.length) return;
   const nMutual = mids.filter(m => {
     const u = state.list.find(x => x.mid === m);
     return u && isMutual(u);
   }).length;
+  // 今日取关预算提示(从本地操作日志统计)
+  let today = 0;
+  try{
+    const o = await api('/api/opslog');
+    const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+    (o.entries || []).forEach(en => {
+      if (en.action === 'unfollow' && (en.ts || 0) * 1000 >= t0.getTime()) today += (en.ok || 0);
+    });
+  }catch(e){}
+  const budget = today + mids.length;
+  const budgetNote = budget > 300
+    ? '<br><span style="color:var(--danger)">⚠ 今日累计将取关 ' + budget + ' 人,超过建议值(300/天),大幅提高风控风险,建议分几天进行。</span>'
+    : '<br><span style="color:var(--muted)">今日累计取关 ' + budget + ' 人(建议每天不超过 300)。</span>';
   showModal('批量取关确认',
     '即将取消关注 <b style="color:var(--danger)">' + mids.length + '</b> 位用户,此操作无法批量撤销!<br><br>' +
     '<span style="color:var(--muted)">' + namesPreview(mids) + (mids.length > 8 ? ' 等' : '') + '</span>' +
     (nMutual ? '<br><br><span style="color:var(--warn)">⚠ 其中有 ' + nMutual + ' 位互粉用户,请确认真的要取关。</span>' : '') +
+    budgetNote +
     '<br><span style="color:var(--muted)">按设置(每批 ' + state.settings.batch_size + ' 人 / 间隔 ' + state.settings.batch_delay + ' 秒)执行,预计 ' + estDuration(mids.length) + ',可看实时进度、随时停止。</span>', [
     {label: '再想想'},
     {label: '确认取关', cls: 'danger', keepOpen: true, onClick: async () => {
@@ -2516,6 +2589,7 @@ function fillSettingsForm(){
   $('#setDelay').value = String(state.settings.batch_delay);
   $('#setTray').value = state.settings.min_to_tray ? 'on' : 'off';
   $('#setNotify').value = state.settings.notify ? 'on' : 'off';
+  $('#setAuto').value = state.settings.autostart ? 'on' : 'off';
   buildSwatches();
 }
 async function loadSettings(){
@@ -2532,6 +2606,7 @@ $('#btnSaveSet').onclick = async () => {
       batch_delay: $('#setDelay').value,
       min_to_tray: $('#setTray').value === 'on',
       notify: $('#setNotify').value === 'on',
+      autostart: $('#setAuto').value === 'on',
     }, 'POST'));
     applyTheme(); fillSettingsForm();
     toast('设置已保存' + (state.settings.min_to_tray ? ',关闭窗口将最小化到托盘' : ''), 'ok');
@@ -2594,14 +2669,15 @@ window.appNotify = (payload) => {
     toast('🔔 检测到关注/粉丝有新变化,点顶部横幅查看详情', 'ok');
   }catch(e){}
 };
-async function loadUpdate(){
+async function loadUpdate(force){
   try{
-    const d = await api('/api/update');
+    const d = await api('/api/update' + (force ? '?force=1' : ''));
     const el = $('#updLine');
     if (el) el.innerHTML = d.has_new
       ? '🆕 发现新版本 v' + esc(d.latest) + '(当前 v' + esc(d.current) + ') · <a href="https://github.com/moleboxee/bibi-follow-manager/releases/latest" target="_blank" rel="noopener">去下载</a>'
-      : '';
-    if (d.has_new) toast('发现新版本 v' + d.latest + ',详见「设置 → 关于」', 'ok');
+      : '✅ 已是最新版本 v' + esc(d.current);
+    if (force) toast(d.has_new ? '发现新版本 v' + d.latest : '已是最新版本', d.has_new ? 'ok' : 'ok');
+    else if (d.has_new) toast('发现新版本 v' + d.latest + ',详见「设置 → 关于」', 'ok');
   }catch(e){}
 }
 boot();
@@ -2744,6 +2820,7 @@ def main():
         pass
     bili = Bili()
     bili.load()
+    bili.settings["autostart"] = _autostart_enabled()  # 以注册表实际状态为准
     STATE["bili"] = bili
     STATE["token"] = secrets.token_hex(16)
     port = pick_port()
