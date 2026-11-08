@@ -38,18 +38,25 @@
 
 ## 使用方法
 
-### 方式一:Python 运行(推荐,体积最小)
+### 方式一:免安装 exe(推荐)
 
-1. 安装 [Python](https://www.python.org/downloads/)(安装时勾选 *Add to PATH*)
-2. 双击 `start.bat`(或在本目录执行 `python bibi_follow_manager.py`)
-3. 浏览器自动打开 `http://127.0.0.1:8410`,扫码登录
+到 [Releases](../../releases) 下载 `BIBI-Follow-Manager.exe`,双击即用——
+**原生桌面窗口**打开,无需安装 Python,数据文件自动保存在 exe 同目录。
 
-### 方式二:打包成免安装 exe
+### 方式二:Python 运行
 
-双击 `build_exe.bat`,完成后得到 `dist\BIBI-Follow-Manager.exe`,
-双击 exe 即可运行,无需安装 Python。
+1. 安装 [Python](https://www.python.org/downloads/)(勾选 *Add to PATH*)
+2. `pip install pywebview`(可选,启用桌面窗口模式)
+3. 双击 `start.bat`(或执行 `python bibi_follow_manager.py`)
+4. 装了 pywebview 时以**原生桌面窗口**打开;未装则自动回退为浏览器打开 `http://127.0.0.1:8410`
 
-> 程序只监听本机 `127.0.0.1`,局域网内其他设备无法访问。
+> - 桌面窗口基于系统自带的 WebView2 运行时(Win10/11 一般自带);缺失时自动回退浏览器
+> - 想强制浏览器模式:设置环境变量 `BIBI_FORCE_BROWSER=1`
+> - 程序只监听本机 `127.0.0.1`,局域网内其他设备无法访问
+
+### 自行打包 exe
+
+双击 `build_exe.bat`,完成后得到 `dist\BIBI-Follow-Manager.exe`(无控制台窗口版)。
 
 ### Cookie 登录(备用方案)
 

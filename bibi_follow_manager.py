@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BIBI 关注管理器 —— 哔哩哔哩(B站)关注/粉丝管理工具 · 本地网页版
+BIBI 关注管理器 —— 哔哩哔哩(B站)关注/粉丝管理工具 · 桌面应用
 
-零依赖:仅使用 Python 标准库,无需 pip 安装任何东西。
+桌面窗口模式(推荐):pip install pywebview 后运行,以原生窗口打开;
+未安装 pywebview 或缺 WebView2 运行时时,自动回退为打开浏览器。
 启动:  python bibi_follow_manager.py   (或双击 start.bat)
-随后自动打开浏览器 http://127.0.0.1:8410
+地址:  http://127.0.0.1:8410(自动顺延)
 
 功能:
   · 扫码 / Cookie 登录,凭据只保存在本机
@@ -37,8 +38,20 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.3.0"
-ROOT = os.path.dirname(os.path.abspath(__file__))
+APP_VER = "1.4.0"
+if getattr(sys, "frozen", False):
+    # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
+    _ROOT = os.path.dirname(os.path.abspath(sys.executable))
+    if not os.access(_ROOT, os.W_OK):
+        _ROOT = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
+                             "BIBI-Follow-Manager")
+        try:
+            os.makedirs(_ROOT, exist_ok=True)
+        except OSError:
+            pass
+else:
+    _ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = _ROOT
 DATA_FILE = os.path.join(ROOT, "bibi_data.json")
 SNAPSHOT_FILE = os.path.join(ROOT, "bibi_snapshot.json")
 OPS_FILE = os.path.join(ROOT, "bibi_ops.json")
@@ -2157,6 +2170,33 @@ def pick_port():
     return START_PORT
 
 
+def try_native_window(srv, url, test_mode=False):
+    """用 pywebview 在原生桌面窗口中打开界面。
+
+    成功:阻塞直到用户关闭窗口,返回 True(进程随后退出)。
+    失败(未安装 pywebview / 缺 WebView2 运行时):返回 False,由调用方回退浏览器。
+    """
+    try:
+        import webview
+    except Exception:
+        return False
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        win = webview.create_window(
+            "BIBI 关注管理器", url,
+            width=1280, height=830, min_size=(980, 640),
+            hidden=bool(test_mode),
+        )
+        if test_mode:
+            threading.Timer(4.0, win.destroy).start()
+        webview.start()
+        return True
+    except Exception:
+        srv.shutdown()
+        return False
+
+
 def main():
     try:
         sys.stdout.reconfigure(errors="replace")
@@ -2173,10 +2213,18 @@ def main():
     print("  BIBI 关注管理器 v%s" % APP_VER)
     print("  本地地址: %s" % url)
     print("  数据文件: %s" % DATA_FILE)
-    print("  关闭本窗口(Ctrl+C)即可退出程序")
+    print("  关闭窗口或按 Ctrl+C 即可退出程序")
     print("=" * 52)
-    if os.environ.get("BIBI_NO_BROWSER") != "1":
-        threading.Timer(0.6, webbrowser.open, args=(url,)).start()
+    no_browser = os.environ.get("BIBI_NO_BROWSER") == "1"
+    if not no_browser and os.environ.get("BIBI_FORCE_BROWSER") != "1":
+        if try_native_window(srv, url,
+                             test_mode=os.environ.get("BIBI_WINDOW_TEST") == "1"):
+            return  # 原生窗口已关闭,退出
+        print("  (未检测到桌面窗口组件,改用浏览器模式)")
+    if no_browser:
+        srv.serve_forever()
+        return
+    threading.Timer(0.6, webbrowser.open, args=(url,)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
