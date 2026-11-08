@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.7.0"
+APP_VER = "1.7.1"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -318,9 +318,12 @@ class Bili:
 
     @staticmethod
     def _trim_user(u, is_follower=False):
+        name = u.get("uname") or ("UID %s" % u.get("mid"))
         return {
             "mid": u.get("mid"),
-            "uname": u.get("uname") or ("UID %s" % u.get("mid")),
+            "uname": name,
+            # B站会把注销账号的昵称统一替换为「账号已注销」
+            "deactivated": 1 if name.strip() in ("账号已注销", "帐号已注销", "账户已注销") else 0,
             "face": (u.get("face") or "").replace("http://", "https://"),
             "sign": u.get("sign") or "",
             "attribute": u.get("attribute", 0),
@@ -1114,6 +1117,7 @@ main{flex:1; overflow-y:auto; padding:14px 16px 90px}
 .b-ok{background:rgba(110,207,142,.15); color:var(--ok)}
 .b-sp{background:rgba(251,114,153,.18); color:var(--accent2)}
 .b-warn{background:rgba(245,176,77,.15); color:var(--warn)}
+.b-dead{background:rgba(139,147,167,.15); color:var(--muted); text-decoration:line-through}
 .b-tag{background:rgba(245,176,77,.15); color:var(--warn)}
 .date{color:var(--muted)}
 .ck{flex:none; display:flex; align-items:flex-start}
@@ -1432,7 +1436,7 @@ const state = {
   changeReport: {follows: null, fans: null},
   sel: new Set(),
   view: 'all', fanView: 'all',
-  filters: {q:'', rel:'all', special:'all', group:'all', sort:'mtime_desc'},
+  filters: {q:'', rel:'all', special:'all', group:'all', dead:'all', sort:'mtime_desc'},
   fanFilters: {q:'', rel:'all', sort:'mtime_desc'},
 };
 let fansTimer = null, qrTimer = null, pollToken = 0, fanToken = 0;
@@ -1644,11 +1648,12 @@ function setView(v){
   state.view = v;
   saveViewState();
   const f = state.filters;
-  f.rel = 'all'; f.special = 'all'; f.group = 'all';
+  f.rel = 'all'; f.special = 'all'; f.group = 'all'; f.dead = 'all';
   if (v === 'mutual') f.rel = 'mutual';
   else if (v === 'oneway') f.rel = 'oneway';
   else if (v === 'special') f.special = 'yes';
   else if (v === 'none') f.group = 'none';
+  else if (v === 'dead') f.dead = 'yes';
   else if (v.startsWith('tag:')) f.group = v.slice(4);
   $('#selRel').value = f.rel; $('#selSpecial').value = f.special;
   $('#selGroup').value = String(f.group);
@@ -1669,11 +1674,13 @@ function renderSidebar(){
   const nMutual = state.list.filter(isMutual).length;
   const nSpecial = state.list.filter(u => u.special === 1).length;
   const nUngrouped = state.list.filter(u => !userTags(u.mid).some(t => t > 0)).length;
+  const nDead = state.list.filter(u => u.deactivated === 1).length;
   const items = [
     ['all', '全部关注', state.list.length],
     ['mutual', '互相关注', nMutual],
     ['oneway', '单向关注', state.list.length - nMutual],
     ['special', '特别关注', nSpecial],
+    ['dead', '已注销', nDead],
     ['none', '未分组', nUngrouped],
   ];
   $('#fixedFilters').innerHTML = items.map(([v, name, n]) =>
@@ -1764,6 +1771,7 @@ function condMatch(){
   const inc = ($('#cdInc') && $('#cdInc').value.trim().toLowerCase()) || '';
   const exc = ($('#cdExc') && $('#cdExc').value.trim().toLowerCase()) || '';
   const nosig = !!( $('#cdNoSig') && $('#cdNoSig').checked );
+  const dead = $('#cdDead') ? $('#cdDead').value : 'all';
   const cut = Date.now() / 1000 - day * 86400;
   let arr = state.list.filter(u => {
     const mutual = isMutual(u);
@@ -1775,6 +1783,8 @@ function condMatch(){
     if (grp === 'none'){ if (tags.length) return false; }
     else if (grp !== 'all'){ if (!tags.includes(Number(grp))) return false; }
     if (day > 0 && u.mtime > cut) return false;
+    if (dead === 'yes' && u.deactivated !== 1) return false;
+    if (dead === 'no' && u.deactivated === 1) return false;
     if (nosig && (u.sign || '').trim()) return false;
     const hay = (u.uname + ' ' + (u.sign || '')).toLowerCase();
     if (inc && !hay.includes(inc)) return false;
@@ -1802,6 +1812,8 @@ function condModal(){
     '<select id="cdGroup"><option value="all">不限</option><option value="none">仅未分组</option>' +
     state.tags.map(t => '<option value="' + t.tagid + '">' + esc(t.name) + '</option>').join('') +
     '</select></div>' +
+    '<div class="set-row"><label style="width:110px">注销账号</label>' +
+    '<select id="cdDead"><option value="all">不限</option><option value="yes" selected>仅已注销</option><option value="no">排除已注销</option></select></div>' +
     '<div class="set-row"><label style="width:110px">关注超过</label>' +
     '<input type="number" id="cdDays" value="0" min="0" style="width:80px"><span style="color:var(--muted);font-size:12px">天(0=不限)</span></div>' +
     '<div class="set-row"><label style="width:110px">包含关键词</label>' +
@@ -1939,6 +1951,8 @@ function filteredList(){
     const tags = userTags(u.mid).filter(t => t > 0);
     if (f.group === 'none'){ if (tags.length) return false; }
     else if (f.group !== 'all'){ if (!tags.includes(Number(f.group))) return false; }
+    if (f.dead === 'yes' && u.deactivated !== 1) return false;
+    if (f.dead === 'no' && u.deactivated === 1) return false;
     return true;
   });
   if (f.sort === 'mtime_asc') arr.sort((a,b) => a.mtime - b.mtime);
@@ -1967,6 +1981,7 @@ function cardHTML(u, isFan){
   const sel = state.sel.has(u.mid);
   const back = fanIsBack(u);
   let badges = '';
+  if (u.deactivated === 1) badges += '<span class="b b-dead">已注销</span>';
   if (isFan){
     badges += back ? '<span class="b b-ok">已回关</span>' : '<span class="b b-warn">未回关</span>';
   } else {
@@ -2253,14 +2268,15 @@ function stamp(){ return new Date().toISOString().slice(0, 10); }
 function csvCell(v){ v = String(v == null ? '' : v); return '"' + v.replace(/"/g, '""') + '"'; }
 function toCSV(arr, isFan){
   const head = isFan
-    ? ['mid','昵称','签名','回关状态','关注我的时间']
-    : ['mid','昵称','签名','互相关注','特别关注','分组','关注时间'];
+    ? ['mid','昵称','签名','回关状态','已注销','关注我的时间']
+    : ['mid','昵称','签名','互相关注','特别关注','已注销','分组','关注时间'];
   const rows = [head.join(',')];
   for (const u of arr){
+    const dead = u.deactivated === 1 ? '是' : '否';
     if (isFan){
-      rows.push([u.mid, u.uname, u.sign, fanIsBack(u) ? '已回关' : '未回关', fmtDate(u.mtime)].map(csvCell).join(','));
+      rows.push([u.mid, u.uname, u.sign, fanIsBack(u) ? '已回关' : '未回关', dead, fmtDate(u.mtime)].map(csvCell).join(','));
     } else {
-      rows.push([u.mid, u.uname, u.sign, isMutual(u) ? '是' : '否', u.special === 1 ? '是' : '否',
+      rows.push([u.mid, u.uname, u.sign, isMutual(u) ? '是' : '否', u.special === 1 ? '是' : '否', dead,
         tagsNames(u.mid).join('|'), fmtDate(u.mtime)].map(csvCell).join(','));
     }
   }
