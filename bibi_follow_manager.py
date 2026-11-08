@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "2.3.0"
+APP_VER = "2.4.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -1603,7 +1603,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
   </div>
   <button id="btnUnfollow" class="danger" onclick="unfollowSelected()">批量取关</button>
   <button id="btnFollowBack" class="primary hidden" onclick="followBackSelected()">批量回关</button>
-  <button id="btnCheckActive" class="hidden" onclick="checkActiveSelected()" title="逐个查询选中用户的最后投稿时间(约1秒/人)">检测活跃度</button>
+  <button id="btnCheckActive" class="hidden" onclick="checkActiveSelected()" title="逐个查询选中用户的最后投稿/动态时间(约1秒/人)">检测活跃度</button>
   <button id="btnProtect" class="hidden" onclick="toggleProtectSelected()" title="保护名单:勾选后点此,全选/向导/批量取关都会跳过这些用户">🔒 保护</button>
   <button class="ghost" onclick="exportSel()">导出选中</button>
   <button class="ghost" onclick="clearSel()">取消选择</button>
@@ -1775,7 +1775,7 @@ function switchView(v){
   $('#btnMoveTag').classList.toggle('hidden', isF);
   $('#btnUnfollow').classList.toggle('hidden', isF);
   $('#btnFollowBack').classList.toggle('hidden', !isF);
-  $('#btnCheckActive').classList.toggle('hidden', isF);
+  $('#btnCheckActive').classList.remove('hidden');
   $('#btnProtect').classList.toggle('hidden', isF);
   $('#tagSection').classList.toggle('hidden', isF);
   $('#q').value = isF ? state.fanFilters.q : state.filters.q;
@@ -2363,6 +2363,7 @@ function cardHTML(u, isFan){
     badges += tagsNames(u.mid).map(t => '<span class="b b-tag">' + esc(t) + '</span>').join('');
   }
   if (!isFan) badges += actLabel(u);
+  if (isFan && actLabel(u)) badges += actLabel(u);
   let action = '';
   if (isFan && !back) action = '<button class="mini" data-fb="' + u.mid + '" onclick="event.stopPropagation(); followOne(' + u.mid + ')">+ 回关</button>';
   return '<div class="card' + (sel ? ' on' : '') + '" data-mid="' + u.mid + '">' +
@@ -2633,7 +2634,6 @@ function followOne(mid){
 }
 /* 活跃度检测:逐个查询选中用户的最后投稿时间(带进度,可停止,缓存1天) */
 async function checkActiveSelected(){
-  if (state.view2 !== 'follows') return toast('请在「我的关注」页使用', 'err');
   const mids = [...state.sel];
   if (!mids.length) return toast('请先勾选要检测的用户', 'err');
   const total = mids.length;
@@ -2709,16 +2709,16 @@ function stamp(){ return new Date().toISOString().slice(0, 10); }
 function csvCell(v){ v = String(v == null ? '' : v); return '"' + v.replace(/"/g, '""') + '"'; }
 function toCSV(arr, isFan){
   const head = isFan
-    ? ['mid','昵称','签名','回关状态','已注销','关注我的时间']
+    ? ['mid','昵称','签名','回关状态','已注销','最后投稿','关注我的时间']
     : ['mid','昵称','签名','互相关注','特别关注','已注销','最后投稿','分组','关注时间'];
   const rows = [head.join(',')];
   for (const u of arr){
     const dead = u.deactivated === 1 ? '是' : '否';
     const a = state.lastActive[u.mid];
-    const actStr = (!isFan && a) ? (a.last_ts ? fmtDate(a.last_ts)
+    const actStr = a ? (a.last_ts ? fmtDate(a.last_ts)
       : (a.has_content === false ? '无投稿无动态' : '')) : '';
     if (isFan){
-      rows.push([u.mid, u.uname, u.sign, fanIsBack(u) ? '已回关' : '未回关', dead, fmtDate(u.mtime)].map(csvCell).join(','));
+      rows.push([u.mid, u.uname, u.sign, fanIsBack(u) ? '已回关' : '未回关', dead, actStr, fmtDate(u.mtime)].map(csvCell).join(','));
     } else {
       rows.push([u.mid, u.uname, u.sign, isMutual(u) ? '是' : '否', u.special === 1 ? '是' : '否', dead, actStr,
         tagsNames(u.mid).join('|'), fmtDate(u.mtime)].map(csvCell).join(','));
