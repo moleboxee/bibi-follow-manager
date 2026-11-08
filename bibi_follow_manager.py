@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.8.0"
+APP_VER = "1.9.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -421,16 +421,48 @@ class Bili:
     def follow_chunk(self, mids):
         return self._batch_modify(mids, 1)
 
-    def last_video_time(self, mid):
-        """查询用户最后投稿时间(秒级时间戳);无投稿返回 None;失败抛 BiliError。"""
-        d = self.api_maybe_wbi(
-            "GET", "https://api.bilibili.com/x/space/wbi/arc/search",
-            params={"mid": mid, "pn": 1, "ps": 1, "order": "pubdate"},
-            referer="https://space.bilibili.com/%s/upload/video" % mid)
-        lst = ((d or {}).get("list") or {}).get("vlist") or []
-        if lst:
-            return lst[0].get("created", 0)
-        return None
+    def last_active_time(self, mid):
+        """最后活跃时间:优先最后投稿视频,无视频再查最后一条动态。
+
+        返回 (last_ts or None, has_content):
+          has_content=True  有视频或动态
+          has_content=False 确认既无视频也无动态(真·死号)
+          has_content=None  无法确定(接口失败/内容不可见)
+        """
+        has_content = None
+        # 1) 投稿视频
+        try:
+            d = self.api_maybe_wbi(
+                "GET", "https://api.bilibili.com/x/space/wbi/arc/search",
+                params={"mid": mid, "pn": 1, "ps": 1, "order": "pubdate"},
+                referer="https://space.bilibili.com/%s/upload/video" % mid)
+            lst = ((d or {}).get("list") or {}).get("vlist") or []
+            if lst:
+                return (lst[0].get("created", 0) or None), True
+            has_content = False  # 无视频,继续看动态
+        except BiliError as e:
+            if e.code in (-412, -352):
+                raise
+            # 视频接口失败(如隐私设置),继续尝试动态
+        # 2) 动态
+        try:
+            d = self.api(
+                "GET", "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space",
+                params={"host_mid": mid},
+                referer="https://space.bilibili.com/%s/dynamic" % mid)
+            items = (d or {}).get("items") or []
+            if items:
+                ts = None
+                try:
+                    ts = items[0]["modules"][0]["module_author"].get("pub_ts")
+                except (KeyError, IndexError, TypeError):
+                    ts = None
+                return (ts or None), True
+            return None, False  # 确认无视频无动态
+        except BiliError as e:
+            if e.code in (-412, -352):
+                raise
+            return None, None  # 动态接口也失败:未知
 
 
 # ---------- 本地快照 / 操作日志 / 历史 ----------
@@ -948,22 +980,27 @@ class Handler(BaseHTTPRequestHandler):
             act = load_json(ACTIVITY_FILE, {})
             now = time.time()
             rec = act.get(mid)
-            if isinstance(rec, dict) and now - rec.get("checked_at", 0) < 86400:
-                return {"mid": mid, "last_ts": rec.get("last_ts"), "cached": True}
+            if isinstance(rec, dict) and rec.get("v") == 2 \
+                    and now - rec.get("checked_at", 0) < 86400:
+                return {"mid": mid, "last_ts": rec.get("last_ts"),
+                        "has_content": rec.get("has_content"), "cached": True}
             try:
-                ts = bili.last_video_time(mid)
-                act[mid] = {"last_ts": ts, "checked_at": now}
+                ts, has_content = bili.last_active_time(mid)
+                act[mid] = {"last_ts": ts, "checked_at": now, "v": 2,
+                            "has_content": has_content}
                 # 只保留最近检测的 5000 条
                 act = dict(sorted(act.items(),
                                   key=lambda kv: -(kv[1].get("checked_at") or 0))[:5000])
                 save_json(ACTIVITY_FILE, act)
-                return {"mid": mid, "last_ts": ts, "cached": False}
+                return {"mid": mid, "last_ts": ts, "has_content": has_content,
+                        "cached": False}
             except BiliError as e:
                 if e.code in (-412, -352):
                     raise
-                act[mid] = {"last_ts": None, "checked_at": now, "err": str(e)}
+                act[mid] = {"last_ts": None, "checked_at": now, "v": 2,
+                            "has_content": None, "err": str(e)}
                 save_json(ACTIVITY_FILE, act)
-                return {"mid": mid, "last_ts": None, "err": str(e)}
+                return {"mid": mid, "last_ts": None, "has_content": None, "err": str(e)}
 
         if method == "GET" and path == "/api/update":
             latest = check_update()
@@ -1500,9 +1537,12 @@ function saveLastActive(){
 function actLabel(u){
   const a = state.lastActive[u.mid];
   if (!a) return '';
-  if (!a.last_ts) return '<span class="b">无投稿</span>';
+  if (a.has_content === false)
+    return '<span class="b b-dead" title="检测于 ' + fmtDate(a.checked_at) + '">📡 无投稿无动态</span>';
+  if (!a.last_ts)
+    return '<span class="b" title="检测于 ' + fmtDate(a.checked_at) + '">📡 内容不可见</span>';
   const days = Math.floor((Date.now() / 1000 - a.last_ts) / 86400);
-  const txt = days <= 0 ? '今天有投稿' : days + ' 天前投稿';
+  const txt = days <= 0 ? '今天有更新' : days + ' 天前更新';
   const cls = days <= 30 ? 'b-ok' : (days <= 365 ? 'b-warn' : 'b-dead');
   return '<span class="b ' + cls + '" title="检测于 ' + fmtDate(a.checked_at) + '">📡 ' + txt + '</span>';
 }
@@ -1863,7 +1903,9 @@ function condMatch(){
     if (actKnown === 'checked' && !act) return false;
     if (actKnown === 'unchecked' && act) return false;
     if (actDays > 0){
-      if (!act || !act.last_ts) return false;
+      if (!act) return false;
+      if (act.has_content === false) return true;  // 无视频无动态,必然超期
+      if (!act.last_ts) return false;
       if ((Date.now() / 1000 - act.last_ts) < actDays * 86400) return false;
     }
     if (nosig && (u.sign || '').trim()) return false;
@@ -1880,6 +1922,29 @@ function condApply(){
   mids.forEach(m => state.sel.add(m));
   renderGrid();
   return mids.length;
+}
+function saveWizard(){
+  try{
+    localStorage.setItem('bibi_wizard', JSON.stringify({
+      rel: ($('#cdRel')||{}).value, sp: ($('#cdSpecial')||{}).value,
+      grp: ($('#cdGroup')||{}).value, dead: ($('#cdDead')||{}).value,
+      days: ($('#cdDays')||{}).value, inc: ($('#cdInc')||{}).value,
+      exc: ($('#cdExc')||{}).value, nosig: ($('#cdNoSig')||{}).checked,
+      actDays: ($('#cdActDays')||{}).value, actKnown: ($('#cdActKnown')||{}).value,
+      cap: ($('#cdCap')||{}).value,
+    }));
+  }catch(e){}
+}
+function restoreWizard(){
+  try{
+    const w = JSON.parse(localStorage.getItem('bibi_wizard') || 'null');
+    if (!w) return;
+    const set = (id, v) => { const el = $('#' + id); if (el && v != null) el.value = v; };
+    set('cdRel', w.rel); set('cdSpecial', w.sp); set('cdGroup', w.grp); set('cdDead', w.dead);
+    set('cdDays', w.days); set('cdInc', w.inc); set('cdExc', w.exc);
+    set('cdActDays', w.actDays); set('cdActKnown', w.actKnown); set('cdCap', w.cap);
+    if ($('#cdNoSig') && w.nosig != null) $('#cdNoSig').checked = !!w.nosig;
+  }catch(e){}
 }
 function condModal(){
   if (state.view2 === 'fans') switchView('follows');
@@ -1917,9 +1982,10 @@ function condModal(){
       toast('已勾选 ' + n + ' 人,请核对后点「批量取关」', 'ok');
     }},
   ]);
-  const upd = () => { const el = $('#cdCount'); if (el) el.textContent = condMatch().length; };
+  const upd = () => { const el = $('#cdCount'); if (el) el.textContent = condMatch().length; saveWizard(); };
   $('#modalBody').addEventListener('input', upd);
   $('#modalBody').addEventListener('change', upd);
+  restoreWizard();
   upd();
 }
 
@@ -2349,14 +2415,15 @@ async function checkActiveSelected(){
     if (batchAbort){ stopped = true; note = '已手动停止,未检测的保持勾选。'; break; }
     try{
       const r = await api('/api/check_active', {mid}, 'POST');
-      state.lastActive[mid] = {last_ts: r.last_ts, checked_at: Date.now() / 1000};
+      state.lastActive[mid] = {last_ts: r.last_ts, has_content: r.has_content,
+                               checked_at: Date.now() / 1000};
     }catch(e){
       if (/风控|登录/.test(e.message)){
         stopped = true; note = esc(e.message);
         toast(e.message, 'err');
         break;
       }
-      state.lastActive[mid] = {last_ts: null, checked_at: Date.now() / 1000};
+      state.lastActive[mid] = {last_ts: null, has_content: null, checked_at: Date.now() / 1000};
     }
     done++;
     if (done % 10 === 0) saveLastActive();
@@ -2403,14 +2470,17 @@ function csvCell(v){ v = String(v == null ? '' : v); return '"' + v.replace(/"/g
 function toCSV(arr, isFan){
   const head = isFan
     ? ['mid','昵称','签名','回关状态','已注销','关注我的时间']
-    : ['mid','昵称','签名','互相关注','特别关注','已注销','分组','关注时间'];
+    : ['mid','昵称','签名','互相关注','特别关注','已注销','最后投稿','分组','关注时间'];
   const rows = [head.join(',')];
   for (const u of arr){
     const dead = u.deactivated === 1 ? '是' : '否';
+    const a = state.lastActive[u.mid];
+    const actStr = (!isFan && a) ? (a.last_ts ? fmtDate(a.last_ts)
+      : (a.has_content === false ? '无投稿无动态' : '')) : '';
     if (isFan){
       rows.push([u.mid, u.uname, u.sign, fanIsBack(u) ? '已回关' : '未回关', dead, fmtDate(u.mtime)].map(csvCell).join(','));
     } else {
-      rows.push([u.mid, u.uname, u.sign, isMutual(u) ? '是' : '否', u.special === 1 ? '是' : '否', dead,
+      rows.push([u.mid, u.uname, u.sign, isMutual(u) ? '是' : '否', u.special === 1 ? '是' : '否', dead, actStr,
         tagsNames(u.mid).join('|'), fmtDate(u.mtime)].map(csvCell).join(','));
     }
   }
