@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.7.1"
+APP_VER = "1.8.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -57,6 +57,7 @@ DATA_FILE = os.path.join(ROOT, "bibi_data.json")
 SNAPSHOT_FILE = os.path.join(ROOT, "bibi_snapshot.json")
 OPS_FILE = os.path.join(ROOT, "bibi_ops.json")
 HISTORY_FILE = os.path.join(ROOT, "bibi_history.json")
+ACTIVITY_FILE = os.path.join(ROOT, "bibi_activity.json")
 START_PORT = 8410
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -420,6 +421,17 @@ class Bili:
     def follow_chunk(self, mids):
         return self._batch_modify(mids, 1)
 
+    def last_video_time(self, mid):
+        """查询用户最后投稿时间(秒级时间戳);无投稿返回 None;失败抛 BiliError。"""
+        d = self.api_maybe_wbi(
+            "GET", "https://api.bilibili.com/x/space/wbi/arc/search",
+            params={"mid": mid, "pn": 1, "ps": 1, "order": "pubdate"},
+            referer="https://space.bilibili.com/%s/upload/video" % mid)
+        lst = ((d or {}).get("list") or {}).get("vlist") or []
+        if lst:
+            return lst[0].get("created", 0)
+        return None
+
 
 # ---------- 本地快照 / 操作日志 / 历史 ----------
 def load_json(path, default):
@@ -442,16 +454,23 @@ def _mini_users(lst):
     return [{"mid": u["mid"], "uname": u["uname"]} for u in lst]
 
 
-def diff_relation(old_list, new_list, unfollowed_map):
-    """对比两次关系快照,生成变化报告(新增 / 不再关注 / 改名)。"""
+def diff_relation(old_list, new_list, unfollowed_map, followed_map=None):
+    """对比两次关系快照,生成变化报告(新增 / 不再关注 / 改名)。
+
+    unfollowed_map/followed_map:本工具最近 90 天内批量取关/回关的 mid 记录,
+    用于把变化归因为"你操作的"而不是"对方操作的"。
+    """
     old_map = {u.get("mid"): u for u in old_list or []}
     new_map = {u.get("mid"): u for u in new_list or []}
     added, removed, renamed = [], [], []
     now = time.time()
+    followed_map = followed_map or {}
     for mid, u in new_map.items():
         o = old_map.get(mid)
         if o is None:
-            added.append({"mid": mid, "uname": u.get("uname", "")})
+            ts = followed_map.get(str(mid), 0)
+            added.append({"mid": mid, "uname": u.get("uname", ""),
+                          "reason": "you" if (ts and now - ts < 30 * 86400) else "new"})
         elif o.get("uname") != u.get("uname"):
             renamed.append({"mid": mid, "from": o.get("uname", ""),
                             "to": u.get("uname", "")})
@@ -477,6 +496,12 @@ def log_op(action, **detail):
             um[str(m)] = time.time()
         cut = time.time() - 90 * 86400
         ops["unfollowed_mids"] = {k: v for k, v in um.items() if v > cut}
+    elif action == "follow":
+        fm = ops.setdefault("followed_mids", {})
+        for m in detail.get("ok_mids", []):
+            fm[str(m)] = time.time()
+        cut = time.time() - 90 * 86400
+        ops["followed_mids"] = {k: v for k, v in fm.items() if v > cut}
     save_json(OPS_FILE, ops)
 
 
@@ -555,8 +580,10 @@ def rebuild_cache(bili):
         # 快照对比(谁取关了我 / 新增关注 / 改名)
         snap = load_json(SNAPSHOT_FILE, {})
         if isinstance(snap.get("followings"), list):
+            _ops = load_json(OPS_FILE, {})
             diff = diff_relation(snap["followings"], _mini_users(lst),
-                                 load_json(OPS_FILE, {}).get("unfollowed_mids", {}))
+                                 _ops.get("unfollowed_mids", {}),
+                                 _ops.get("followed_mids", {}))
         else:
             diff = {"added": [], "removed": [], "renamed": []}
         snap["followings"] = _mini_users(lst)
@@ -914,6 +941,30 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/api/history":
             return load_json(HISTORY_FILE, [])
 
+        if method == "POST" and path == "/api/check_active":
+            mid = str(b.get("mid") or "")
+            if not mid or not mid.isdigit():
+                raise BiliError("缺少 mid")
+            act = load_json(ACTIVITY_FILE, {})
+            now = time.time()
+            rec = act.get(mid)
+            if isinstance(rec, dict) and now - rec.get("checked_at", 0) < 86400:
+                return {"mid": mid, "last_ts": rec.get("last_ts"), "cached": True}
+            try:
+                ts = bili.last_video_time(mid)
+                act[mid] = {"last_ts": ts, "checked_at": now}
+                # 只保留最近检测的 5000 条
+                act = dict(sorted(act.items(),
+                                  key=lambda kv: -(kv[1].get("checked_at") or 0))[:5000])
+                save_json(ACTIVITY_FILE, act)
+                return {"mid": mid, "last_ts": ts, "cached": False}
+            except BiliError as e:
+                if e.code in (-412, -352):
+                    raise
+                act[mid] = {"last_ts": None, "checked_at": now, "err": str(e)}
+                save_json(ACTIVITY_FILE, act)
+                return {"mid": mid, "last_ts": None, "err": str(e)}
+
         if method == "GET" and path == "/api/update":
             latest = check_update()
             return {"current": APP_VER, "latest": latest,
@@ -987,7 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
         if act == 2:
             log_op("unfollow", ok=len(ok), fail=len(fail), ok_mids=ok)
         else:
-            log_op("follow", ok=len(ok), fail=len(fail))
+            log_op("follow", ok=len(ok), fail=len(fail), ok_mids=ok)
         return {"ok_mids": ok, "fail": fail}
 
     def _add_tag(self, bili, b):
@@ -1356,6 +1407,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
   </div>
   <button id="btnUnfollow" class="danger" onclick="unfollowSelected()">批量取关</button>
   <button id="btnFollowBack" class="primary hidden" onclick="followBackSelected()">批量回关</button>
+  <button id="btnCheckActive" class="hidden" onclick="checkActiveSelected()" title="逐个查询选中用户的最后投稿时间(约1秒/人)">检测活跃度</button>
   <button class="ghost" onclick="exportSel()">导出选中</button>
   <button class="ghost" onclick="clearSel()">取消选择</button>
 </div>
@@ -1433,13 +1485,27 @@ const state = {
   stat: {follower: 0, following: 0},
   settings: {theme:'dark', accent:'pink', batch_size:10, batch_delay:1},
   history: [],
+  lastActive: {},            // mid -> {last_ts, checked_at}
   changeReport: {follows: null, fans: null},
   sel: new Set(),
   view: 'all', fanView: 'all',
   filters: {q:'', rel:'all', special:'all', group:'all', dead:'all', sort:'mtime_desc'},
-  fanFilters: {q:'', rel:'all', sort:'mtime_desc'},
+  fanFilters: {q:'', rel:'all', dead:'all', sort:'mtime_desc'},
 };
 let fansTimer = null, qrTimer = null, pollToken = 0, fanToken = 0;
+try{ state.lastActive = JSON.parse(localStorage.getItem('bibi_lastActive') || '{}') || {}; }catch(e){ state.lastActive = {}; }
+function saveLastActive(){
+  try{ localStorage.setItem('bibi_lastActive', JSON.stringify(state.lastActive)); }catch(e){}
+}
+function actLabel(u){
+  const a = state.lastActive[u.mid];
+  if (!a) return '';
+  if (!a.last_ts) return '<span class="b">无投稿</span>';
+  const days = Math.floor((Date.now() / 1000 - a.last_ts) / 86400);
+  const txt = days <= 0 ? '今天有投稿' : days + ' 天前投稿';
+  const cls = days <= 30 ? 'b-ok' : (days <= 365 ? 'b-warn' : 'b-dead');
+  return '<span class="b ' + cls + '" title="检测于 ' + fmtDate(a.checked_at) + '">📡 ' + txt + '</span>';
+}
 
 function rebuildMemberOf(){
   const m = {};
@@ -1491,6 +1557,7 @@ function switchView(v){
   $('#btnMoveTag').classList.toggle('hidden', isF);
   $('#btnUnfollow').classList.toggle('hidden', isF);
   $('#btnFollowBack').classList.toggle('hidden', !isF);
+  $('#btnCheckActive').classList.toggle('hidden', isF);
   $('#tagSection').classList.toggle('hidden', isF);
   $('#q').value = isF ? state.fanFilters.q : state.filters.q;
   if (v === 'follows'){ renderSidebar(); renderGrid(); }
@@ -1663,6 +1730,7 @@ function setFanView(v){
   state.fanView = v;
   saveViewState();
   state.fanFilters.rel = (v === 'back' || v === 'unback') ? v : 'all';
+  state.fanFilters.dead = (v === 'dead') ? 'yes' : 'all';
   $('#fansRel').value = state.fanFilters.rel;
   renderFanSidebar(); renderGrid();
 }
@@ -1699,10 +1767,12 @@ function renderSidebar(){
 }
 function renderFanSidebar(){
   const nBack = state.fans.filter(fanIsBack).length;
+  const nDead = state.fans.filter(u => u.deactivated === 1).length;
   const items = [
     ['all', '全部粉丝', state.fans.length],
     ['back', '已回关', nBack],
     ['unback', '未回关', state.fans.length - nBack],
+    ['dead', '已注销', nDead],
   ];
   $('#fixedFilters').innerHTML = items.map(([v, name, n]) =>
     '<div class="side-item' + (state.fanView === v ? ' on' : '') + '" onclick="setFanView(\'' + v + '\')">' +
@@ -1748,7 +1818,8 @@ function chgLink(u){
 function showChanges(){
   const f = state.changeReport.follows, n = state.changeReport.fans;
   let html = '';
-  html += chgList('➕ 新增关注', f && f.added, u => '<div>' + chgLink(u) + '</div>');
+  html += chgList('➕ 新增关注', f && f.added, u => '<div>' + chgLink(u) +
+    (u.reason === 'you' ? ' <span style="color:var(--muted)">(你回关/关注的)</span>' : '') + '</div>');
   html += chgList('➖ 不再关注', f && f.removed, u => '<div>' + chgLink(u) +
     ' <span style="color:var(--muted)">(' + (u.reason === 'you' ? '你取关的' : '对方取关或已移除') + ')</span></div>');
   html += chgList('✏️ 改名', f && f.renamed, u => '<div>' + chgLink(u) +
@@ -1772,6 +1843,9 @@ function condMatch(){
   const exc = ($('#cdExc') && $('#cdExc').value.trim().toLowerCase()) || '';
   const nosig = !!( $('#cdNoSig') && $('#cdNoSig').checked );
   const dead = $('#cdDead') ? $('#cdDead').value : 'all';
+  const actDaysEl = $('#cdActDays');
+  const actDays = actDaysEl ? (parseInt(actDaysEl.value, 10) || 0) : 0;
+  const actKnown = $('#cdActKnown') ? $('#cdActKnown').value : 'all';
   const cut = Date.now() / 1000 - day * 86400;
   let arr = state.list.filter(u => {
     const mutual = isMutual(u);
@@ -1785,6 +1859,13 @@ function condMatch(){
     if (day > 0 && u.mtime > cut) return false;
     if (dead === 'yes' && u.deactivated !== 1) return false;
     if (dead === 'no' && u.deactivated === 1) return false;
+    const act = state.lastActive[u.mid];
+    if (actKnown === 'checked' && !act) return false;
+    if (actKnown === 'unchecked' && act) return false;
+    if (actDays > 0){
+      if (!act || !act.last_ts) return false;
+      if ((Date.now() / 1000 - act.last_ts) < actDays * 86400) return false;
+    }
     if (nosig && (u.sign || '').trim()) return false;
     const hay = (u.uname + ' ' + (u.sign || '')).toLowerCase();
     if (inc && !hay.includes(inc)) return false;
@@ -1822,6 +1903,11 @@ function condModal(){
     '<input type="text" id="cdExc" placeholder="昵称或签名包含则排除" style="flex:1"></div>' +
     '<div class="set-row"><label style="width:110px">其他</label>' +
     '<label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="cdNoSig"> 仅无签名用户(多为普通账号)</label></div>' +
+    '<div class="set-row"><label style="width:110px">距上次投稿</label>' +
+    '<input type="number" id="cdActDays" value="0" min="0" style="width:80px"><span style="color:var(--muted);font-size:12px">超过 N 天(0=不限;仅对已检测过活跃度的用户生效)</span></div>' +
+    '<div class="set-row"><label style="width:110px">活跃度数据</label>' +
+    '<select id="cdActKnown"><option value="all">不限</option><option value="checked">仅已检测</option><option value="unchecked">仅未检测</option></select>' +
+    '<span style="color:var(--muted);font-size:12px">先勾选用户 → 批量条「检测活跃度」</span></div>' +
     '<div class="set-row"><label style="width:110px">勾选上限</label>' +
     '<input type="number" id="cdCap" value="0" min="0" style="width:80px"><span style="color:var(--muted);font-size:12px">人(0=不限;按当前排序取前 N 个)</span></div>' +
     '<div style="color:var(--muted);font-size:13px;border-top:1px solid var(--line);padding-top:10px">将勾选匹配的 <b id="cdCount" style="color:var(--accent2)">0</b> 人(只帮你勾选,不会直接取关,请核对后执行)</div>', [
@@ -1970,6 +2056,7 @@ function filteredFans(){
     const back = fanIsBack(u);
     if (f.rel === 'back' && !back) return false;
     if (f.rel === 'unback' && back) return false;
+    if (f.dead === 'yes' && u.deactivated !== 1) return false;
     return true;
   });
   if (f.sort === 'mtime_asc') arr.sort((a,b) => a.mtime - b.mtime);
@@ -1989,6 +2076,7 @@ function cardHTML(u, isFan){
     if (u.special === 1) badges += '<span class="b b-sp">特别</span>';
     badges += tagsNames(u.mid).map(t => '<span class="b b-tag">' + esc(t) + '</span>').join('');
   }
+  if (!isFan) badges += actLabel(u);
   let action = '';
   if (isFan && !back) action = '<button class="mini" data-fb="' + u.mid + '" onclick="event.stopPropagation(); followOne(' + u.mid + ')">+ 回关</button>';
   return '<div class="card' + (sel ? ' on' : '') + '" data-mid="' + u.mid + '">' +
@@ -2236,6 +2324,52 @@ function followOne(mid){
     renderFanSidebar(); renderGrid(); renderStats();
     toast('回关成功', 'ok');
   }).catch(e => toast(e.message, 'err'));
+}
+/* 活跃度检测:逐个查询选中用户的最后投稿时间(带进度,可停止,缓存1天) */
+async function checkActiveSelected(){
+  if (state.view2 !== 'follows') return toast('请在「我的关注」页使用', 'err');
+  const mids = [...state.sel];
+  if (!mids.length) return toast('请先勾选要检测的用户', 'err');
+  const total = mids.length;
+  let done = 0, stopped = false, note = '';
+  batchAbort = false;
+  const render = () => {
+    const pct = total ? Math.round(done / total * 100) : 100;
+    $('#modalBody').innerHTML =
+      '<div class="pbar"><i style="width:' + pct + '%"></i></div>' +
+      '<div style="color:var(--muted);font-size:13px">检测中 ' + done + ' / ' + total +
+      '(约1秒/人,结果已缓存)</div>' +
+      (note ? '<div style="color:var(--warn);font-size:12px;margin-top:8px">' + note + '</div>' : '');
+  };
+  showModal('活跃度检测', '', [
+    {label: '停止', keepOpen: true, onClick: async () => { batchAbort = true; }},
+  ]);
+  render();
+  for (const mid of mids){
+    if (batchAbort){ stopped = true; note = '已手动停止,未检测的保持勾选。'; break; }
+    try{
+      const r = await api('/api/check_active', {mid}, 'POST');
+      state.lastActive[mid] = {last_ts: r.last_ts, checked_at: Date.now() / 1000};
+    }catch(e){
+      if (/风控|登录/.test(e.message)){
+        stopped = true; note = esc(e.message);
+        toast(e.message, 'err');
+        break;
+      }
+      state.lastActive[mid] = {last_ts: null, checked_at: Date.now() / 1000};
+    }
+    done++;
+    if (done % 10 === 0) saveLastActive();
+    render();
+    if (done < total) await sleep(900 + Math.random() * 600);
+  }
+  saveLastActive();
+  renderGrid();
+  render();
+  let html = '<div style="font-size:14px;margin-top:4px">检测完成:' + done + ' / ' + total + ' 人</div>';
+  if (note) html += '<div style="color:var(--warn);font-size:12px;margin-top:8px">' + note + '</div>';
+  html += '<div style="color:var(--muted);font-size:12px;margin-top:6px">结果已缓存(24小时内不重复请求),卡片上会显示「📡 N天前投稿」徽章,清理向导里可按「距上次投稿超过 N 天」筛选。</div>';
+  showModal('活跃度检测完成', html, [{label: '关闭'}]);
 }
 function followBackSelected(){
   const mids = [...state.sel];
