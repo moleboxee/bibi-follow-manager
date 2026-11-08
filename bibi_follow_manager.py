@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "2.8.0"
+APP_VER = "2.9.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -2186,6 +2186,56 @@ function saveWizard(){
     }));
   }catch(e){}
 }
+function loadPresets(){
+  try{ return JSON.parse(localStorage.getItem('bibi_presets') || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function savePresets(p){ try{ localStorage.setItem('bibi_presets', JSON.stringify(p)); }catch(e){} }
+function buildPresetSelect(){
+  const sel = $('#cdPreset');
+  if (!sel) return;
+  const p = loadPresets();
+  sel.innerHTML = '<option value="">— 选择已存预设 —</option>' +
+    Object.keys(p).map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
+  sel.value = '';
+}
+function applyPreset(){
+  const name = ($('#cdPreset') || {}).value;
+  if (!name) return;
+  const p = loadPresets()[name];
+  if (!p) return;
+  const set = (id, v) => { const el = $('#' + id); if (el && v != null) el.value = v; };
+  set('cdRel', p.rel); set('cdSpecial', p.sp); set('cdGroup', p.grp); set('cdDead', p.dead);
+  set('cdDays', p.days); set('cdInc', p.inc); set('cdExc', p.exc);
+  set('cdActDays', p.actDays); set('cdActKnown', p.actKnown); set('cdCap', p.cap);
+  if ($('#cdNoSig')) $('#cdNoSig').checked = !!p.nosig;
+  upd && upd();
+  toast('已应用预设「' + name + '」', 'ok');
+}
+function savePreset(){
+  const name = prompt('预设名称:');
+  if (!name) return;
+  const p = loadPresets();
+  p[name.trim()] = {
+    rel: ($('#cdRel')||{}).value, sp: ($('#cdSpecial')||{}).value,
+    grp: ($('#cdGroup')||{}).value, dead: ($('#cdDead')||{}).value,
+    days: ($('#cdDays')||{}).value, inc: ($('#cdInc')||{}).value,
+    exc: ($('#cdExc')||{}).value, nosig: ($('#cdNoSig')||{}).checked,
+    actDays: ($('#cdActDays')||{}).value, actKnown: ($('#cdActKnown')||{}).value,
+    cap: ($('#cdCap')||{}).value,
+  };
+  savePresets(p); buildPresetSelect();
+  $('#cdPreset').value = name.trim();
+  toast('预设「' + name.trim() + '」已保存', 'ok');
+}
+function delPreset(){
+  const name = ($('#cdPreset') || {}).value;
+  if (!name) return toast('请先在下拉框选择要删除的预设', 'err');
+  const p = loadPresets();
+  delete p[name];
+  savePresets(p); buildPresetSelect();
+  toast('预设「' + name + '」已删除', 'ok');
+}
 function restoreWizard(){
   try{
     const w = JSON.parse(localStorage.getItem('bibi_wizard') || 'null');
@@ -2201,6 +2251,10 @@ function condModal(){
   if (state.view2 === 'fans') switchView('follows');
   if (!state.list.length) return toast('请先加载关注数据', 'err');
   showModal('按条件选择(清理向导)',
+    '<div class="set-row"><label style="width:110px">预设</label>' +
+    '<select id="cdPreset" style="flex:1" onchange="applyPreset()"></select>' +
+    '<button class="ghost" onclick="savePreset()" title="把当前条件保存为预设">存</button>' +
+    '<button class="ghost" onclick="delPreset()" title="删除选中的预设">删</button></div>' +
     '<div class="set-row"><label style="width:110px">关注关系</label>' +
     '<select id="cdRel"><option value="all">全部</option><option value="oneway" selected>仅单向(没回粉)</option><option value="mutual">仅互粉</option></select></div>' +
     '<div class="set-row"><label style="width:110px">特别关注</label>' +
@@ -2236,6 +2290,7 @@ function condModal(){
   const upd = () => { const el = $('#cdCount'); if (el) el.textContent = condMatch().length; saveWizard(); };
   $('#modalBody').addEventListener('input', upd);
   $('#modalBody').addEventListener('change', upd);
+  buildPresetSelect();
   restoreWizard();
   upd();
 }
