@@ -28,6 +28,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 import secrets
 import socket
 import sys
@@ -38,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.6.2"
+APP_VER = "1.6.3"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -185,16 +186,20 @@ class Bili:
         code = j.get("code", -1)
         if code != 0:
             msg = j.get("message") or j.get("msg") or ("未知错误 code=%s" % code)
+            if code == -352:
+                msg = "触发B站风控(-352),请等 30 分钟~几小时后再刷新"
+            elif code == -412:
+                msg = "触发B站风控(-412),请稍后再试"
             raise BiliError(msg, code=code, need_login=(code == -101))
         return j.get("data")
 
     def api_maybe_wbi(self, method, url, params=None, data=None,
                       referer="https://www.bilibili.com/"):
-        """先按普通请求调用;若被风控/签名拦截(-403/-412)再用 WBI 签名重试一次。"""
+        """先按普通请求调用;若被风控/签名拦截(-403/-412/-352)再用 WBI 签名重试一次。"""
         try:
             return self.api(method, url, params=params, data=data, referer=referer)
         except BiliError as e:
-            if e.code in (-403, -412) and params:
+            if e.code in (-403, -412, -352) and params:
                 return self.api(method, url, params=params, data=data,
                                 referer=referer, sign=True)
             raise
@@ -335,7 +340,7 @@ class Bili:
             if not lst or len(lst) < ps or (total and len(out) >= total):
                 break
             pn += 1
-            time.sleep(0.25)
+            time.sleep(0.25 + random.random() * 0.3)  # 随机抖动,降低风控概率
         return out, total or len(out)
 
     def fetch_all_followings(self, mid, progress_cb=None):
@@ -691,8 +696,12 @@ def _notify_tray(title, msg):
 
 
 def auto_check_loop():
-    """登录状态下每30分钟拉取关注/粉丝快照,发现变化推送窗口通知。"""
-    time.sleep(180)
+    """登录状态下每60分钟拉取关注/粉丝快照,发现变化推送窗口通知。
+
+    大列表(数千关注)一次全量拉取要翻上百页,间隔太密容易触发风控,
+    所以固定 1 小时;手动「刷新」不受影响。
+    """
+    time.sleep(600)
     while True:
         bili = STATE.get("bili")
         if bili and bili.cookies.get("SESSDATA"):
@@ -724,7 +733,7 @@ def auto_check_loop():
                             _push_to_window("appNotify(%s)" % payload)
             except Exception:
                 pass
-        time.sleep(1800)
+        time.sleep(3600)
 
 
 # ---------- 本地 HTTP 服务 ----------
