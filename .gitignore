@@ -1,5 +1,5 @@
-# 登录凭据,绝不提交
-bibi_data.json
+# 登录凭据与本地数据,绝不提交
+bibi_*.json
 
 # 构建临时文件
 vendor_tmp/
