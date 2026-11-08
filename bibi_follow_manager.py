@@ -38,7 +38,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "1.5.0"
+APP_VER = "1.6.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -87,7 +87,7 @@ QRCODE_JS_B64 = "Ly8tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0
 QRCODE_JS = base64.b64decode(QRCODE_JS_B64).decode("utf-8") if QRCODE_JS_B64 else ""
 
 DEFAULT_SETTINGS = {"theme": "dark", "accent": "pink", "min_to_tray": False,
-                    "batch_size": 10, "batch_delay": 1.0}
+                    "notify": True, "batch_size": 10, "batch_delay": 1.0}
 
 
 class BiliError(Exception):
@@ -119,6 +119,7 @@ class Bili:
             self.settings["theme"] = s.get("theme", "dark")
             self.settings["accent"] = s.get("accent", "pink")
             self.settings["min_to_tray"] = bool(s.get("min_to_tray", False))
+            self.settings["notify"] = bool(s.get("notify", True))
             try:
                 self.settings["batch_size"] = min(50, max(1, int(s.get("batch_size", 10))))
             except (TypeError, ValueError):
@@ -678,6 +679,17 @@ def _push_to_window(js):
         pass
 
 
+def _notify_tray(title, msg):
+    """窗口隐藏到托盘时,用托盘气泡提醒(Windows 上显示为系统通知)。"""
+    tray = STATE.get("tray")
+    if not tray:
+        return
+    try:
+        tray.notify(msg, title)
+    except Exception:
+        pass
+
+
 def auto_check_loop():
     """登录状态下每30分钟拉取关注/粉丝快照,发现变化推送窗口通知。"""
     time.sleep(180)
@@ -697,13 +709,19 @@ def auto_check_loop():
                     diff = CACHE.get("diff") if CACHE["status"] == "ok" else None
                     fdiff = FAN_CACHE.get("diff") if FAN_CACHE["status"] == "ok" else None
                 if diff or fdiff:
-                    interesting = (len((diff or {}).get("removed") or [])
-                                   + len((diff or {}).get("added") or [])
-                                   + len((fdiff or {}).get("removed") or []))
-                    if interesting:
-                        payload = json.dumps({"follows": diff, "fans": fdiff},
-                                             ensure_ascii=False)
-                        _push_to_window("appNotify(%s)" % payload)
+                    n_rm = len((diff or {}).get("removed") or [])
+                    n_add = len((diff or {}).get("added") or [])
+                    n_nr = len((fdiff or {}).get("removed") or [])
+                    if n_rm or n_add or n_nr:
+                        if STATE.get("win_hidden"):
+                            if STATE["bili"].settings.get("notify", True):
+                                _notify_tray("谁取关了你?",
+                                             "不再关注 %d · 新增关注 %d · 取关你的粉丝 %d\n点击托盘图标查看"
+                                             % (n_rm, n_add, n_nr))
+                        else:
+                            payload = json.dumps({"follows": diff, "fans": fdiff},
+                                                 ensure_ascii=False)
+                            _push_to_window("appNotify(%s)" % payload)
             except Exception:
                 pass
         time.sleep(1800)
@@ -803,6 +821,8 @@ class Handler(BaseHTTPRequestHandler):
                 bili.settings["accent"] = b["accent"]
             if "min_to_tray" in b:
                 bili.settings["min_to_tray"] = bool(b.get("min_to_tray"))
+            if "notify" in b:
+                bili.settings["notify"] = bool(b.get("notify"))
             if "batch_size" in b:
                 try:
                     bili.settings["batch_size"] = min(50, max(1, int(b["batch_size"])))
@@ -886,6 +906,15 @@ class Handler(BaseHTTPRequestHandler):
             latest = check_update()
             return {"current": APP_VER, "latest": latest,
                     "has_new": bool(latest) and _ver_tuple(latest) > _ver_tuple(APP_VER)}
+
+        if method == "GET" and path == "/api/ping":
+            return {"app": "BibiFM", "ver": APP_VER}
+
+        if method == "POST" and path == "/api/open_folder":
+            if hasattr(os, "startfile"):
+                os.startfile(ROOT)  # noqa 仅 Windows
+                return {}
+            raise BiliError("仅支持在 Windows 上打开文件夹")
 
         if method == "POST" and path == "/api/tags/create":
             name = (b.get("name") or "").strip()
@@ -1257,6 +1286,14 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
             </select>
           </div>
           <div class="hint">「最小化到托盘」:点关闭只是隐藏到右下角托盘(小电视图标),后台继续定时检查取关/掉粉并弹提醒;从托盘菜单可显示或退出。仅桌面窗口模式生效。</div>
+          <div class="set-row">
+            <label>后台变化通知</label>
+            <select id="setNotify">
+              <option value="on">弹系统通知</option>
+              <option value="off">不弹通知</option>
+            </select>
+          </div>
+          <div class="hint">窗口最小化到托盘期间,自动检查发现取关/掉粉时弹系统气泡通知。</div>
           <h3>批量操作(防风控)</h3>
           <div class="set-row">
             <label>每批人数</label>
@@ -1285,7 +1322,10 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
             数据文件:脚本同目录 bibi_data.json(含登录 Cookie,请勿外传)<br>
             「移入分组」为把用户加入目标分组,B站允许一人属于多个分组<br>
             仅供个人学习交流,请勿用于批量营销等违反B站用户协议的场景
-            <div style="margin-top:10px"><button class="ghost" onclick="showOpsLog()">查看操作日志</button></div>
+            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="ghost" onclick="showOpsLog()">查看操作日志</button>
+              <button class="ghost" onclick="openFolder()">打开数据文件夹</button>
+            </div>
           </div>
         </div>
       </div>
@@ -1421,6 +1461,7 @@ function switchView(v){
   if (state.view2 === v) return;
   state.view2 = v;
   state.sel.clear();
+  saveViewState();
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
   $('aside').classList.toggle('hidden', v === 'settings');
   $('#paneSettings').classList.toggle('hidden', v !== 'settings');
@@ -1591,6 +1632,7 @@ async function loadHistory(){
 /* ===================== 渲染:侧栏 ===================== */
 function setView(v){
   state.view = v;
+  saveViewState();
   const f = state.filters;
   f.rel = 'all'; f.special = 'all'; f.group = 'all';
   if (v === 'mutual') f.rel = 'mutual';
@@ -1604,6 +1646,7 @@ function setView(v){
 }
 function setFanView(v){
   state.fanView = v;
+  saveViewState();
   state.fanFilters.rel = (v === 'back' || v === 'unback') ? v : 'all';
   $('#fansRel').value = state.fanFilters.rel;
   renderFanSidebar(); renderGrid();
@@ -1744,6 +1787,20 @@ function condModal(){
 function saveFilters(){
   try{
     localStorage.setItem('bibi_filters', JSON.stringify({filters: state.filters, fanFilters: state.fanFilters}));
+  }catch(e){}
+}
+function saveViewState(){
+  try{
+    localStorage.setItem('bibi_view', JSON.stringify({view2: state.view2, view: state.view, fanView: state.fanView}));
+  }catch(e){}
+}
+function restoreViewState(){
+  try{
+    const v = JSON.parse(localStorage.getItem('bibi_view') || 'null');
+    if (!v) return;
+    if (v.view2 === 'fans' || v.view2 === 'settings') switchView(v.view2);
+    if (v.view && v.view !== 'all' && v.view !== 'custom' && state.view2 === 'follows') setView(v.view);
+    else if (v.fanView && v.fanView !== 'all' && v.fanView !== 'custom' && state.view2 === 'fans') setFanView(v.fanView);
   }catch(e){}
 }
 function loadFilters(){
@@ -2014,6 +2071,13 @@ document.addEventListener('keydown', e => {
     if (!$('#modalMask').classList.contains('hidden')) closeModal();
     document.querySelectorAll('.dd-menu').forEach(m => m.classList.add('hidden'));
   }
+  const tag = ((document.activeElement || {}).tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f'){
+    e.preventDefault(); $('#q').focus(); $('#q').select();
+  } else if (e.key === '/'){
+    e.preventDefault(); $('#q').focus();
+  }
 });
 function estDuration(n){
   const size = Math.max(1, parseInt(state.settings.batch_size) || 10);
@@ -2189,6 +2253,7 @@ function fillSettingsForm(){
   $('#setBatch').value = String(state.settings.batch_size);
   $('#setDelay').value = String(state.settings.batch_delay);
   $('#setTray').value = state.settings.min_to_tray ? 'on' : 'off';
+  $('#setNotify').value = state.settings.notify ? 'on' : 'off';
   buildSwatches();
 }
 async function loadSettings(){
@@ -2204,6 +2269,7 @@ $('#btnSaveSet').onclick = async () => {
       batch_size: $('#setBatch').value,
       batch_delay: $('#setDelay').value,
       min_to_tray: $('#setTray').value === 'on',
+      notify: $('#setNotify').value === 'on',
     }, 'POST'));
     applyTheme(); fillSettingsForm();
     toast('设置已保存' + (state.settings.min_to_tray ? ',关闭窗口将最小化到托盘' : ''), 'ok');
@@ -2251,6 +2317,7 @@ async function boot(){
     window.__tk = d.token || '';
     if (d.logged){
       state.me = d; showApp(); startLoad(false); loadStat(); loadHistory(); loadUpdate();
+      restoreViewState();
     } else showLogin();
   }catch(e){ showLogin(); }
 }
@@ -2285,6 +2352,26 @@ boot();
 PAGE_HTML = PAGE_HTML.replace("__VER__", APP_VER)
 
 
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def probe_existing():
+    """探测是否已有本程序实例在运行(返回其端口或 None)。
+
+    注意必须绕过系统代理:否则 Clash 等代理会把 127.0.0.1 的请求转发到代理自身。
+    """
+    for port in range(START_PORT, START_PORT + 20):
+        try:
+            with _NO_PROXY_OPENER.open(
+                    "http://127.0.0.1:%d/api/ping" % port, timeout=1.0) as r:
+                j = json.loads(r.read().decode("utf-8", "replace"))
+            if (j.get("data") or {}).get("app") == "BibiFM":
+                return port
+        except Exception:
+            continue
+    return None
+
+
 def pick_port():
     for p in range(START_PORT, START_PORT + 20):
         try:
@@ -2304,7 +2391,7 @@ def _icon_path():
     return os.path.join(ROOT, "app.ico")
 
 
-def _setup_tray(win):
+def _setup_tray(win, on_show):
     """系统托盘图标(失败静默跳过)。"""
     try:
         import pystray
@@ -2312,11 +2399,8 @@ def _setup_tray(win):
 
         img = Image.open(_icon_path())
 
-        def on_show(icon, item):
-            try:
-                win.show()
-            except Exception:
-                pass
+        def _show(icon, item):
+            on_show()
 
         def on_exit(icon, item):
             try:
@@ -2329,7 +2413,7 @@ def _setup_tray(win):
                 pass
 
         icon = pystray.Icon("BIBI", img, "BIBI 关注管理器", menu=pystray.Menu(
-            pystray.MenuItem("显示主窗口", on_show, default=True),
+            pystray.MenuItem("显示主窗口", _show, default=True),
             pystray.MenuItem("退出", on_exit),
         ))
         threading.Thread(target=icon.run, daemon=True).start()
@@ -2338,9 +2422,10 @@ def _setup_tray(win):
         return None
 
 
-def try_native_window(srv, url, test_mode=False):
+def try_native_window(url, srv=None, test_mode=False):
     """用 pywebview 在原生桌面窗口中打开界面。
 
+    srv=None 时(单实例的第二个窗口)只创建窗口,连到已运行的实例。
     成功:阻塞直到用户关闭窗口,返回 True(进程随后退出)。
     失败(未安装 pywebview / 缺 WebView2 运行时):返回 False,由调用方回退浏览器。
     """
@@ -2348,8 +2433,8 @@ def try_native_window(srv, url, test_mode=False):
         import webview
     except Exception:
         return False
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
+    if srv is not None:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         win = webview.create_window(
             "BIBI 关注管理器", url,
@@ -2358,13 +2443,22 @@ def try_native_window(srv, url, test_mode=False):
         )
         STATE["win"] = win
 
+        def show_main():
+            STATE["win_hidden"] = False
+            try:
+                win.show()
+            except Exception:
+                pass
+
         def on_closing():
             # 设置开启时:点关闭 = 隐藏到托盘继续运行(返回 False 取消关闭)
-            if STATE.get("tray") and STATE["bili"].settings.get("min_to_tray"):
+            if STATE.get("tray") and STATE["bili"] and \
+                    STATE["bili"].settings.get("min_to_tray"):
                 try:
                     win.hide()
                 except Exception:
                     pass
+                STATE["win_hidden"] = True
                 return False
             return None
 
@@ -2372,11 +2466,12 @@ def try_native_window(srv, url, test_mode=False):
         if test_mode:
             threading.Timer(4.0, win.destroy).start()
         else:
-            STATE["tray"] = _setup_tray(win)
+            STATE["tray"] = _setup_tray(win, show_main)
         webview.start()
         return True
     except Exception:
-        srv.shutdown()
+        if srv is not None:
+            srv.shutdown()
         return False
 
 
@@ -2399,9 +2494,19 @@ def main():
     print("  关闭窗口或按 Ctrl+C 即可退出程序")
     print("=" * 52)
     no_browser = os.environ.get("BIBI_NO_BROWSER") == "1"
+    # 单实例:已有实例在跑时,直接给它开一个新窗口,不再起第二个服务
+    if not no_browser:
+        existing = probe_existing()
+        if existing:
+            url0 = "http://127.0.0.1:%d" % existing
+            print("  检测到程序已在运行(端口 %d),直接打开新窗口" % existing)
+            if try_native_window(url0):
+                return
+            webbrowser.open(url0)
+            return
     threading.Thread(target=auto_check_loop, daemon=True).start()
     if not no_browser and os.environ.get("BIBI_FORCE_BROWSER") != "1":
-        if try_native_window(srv, url,
+        if try_native_window(url, srv=srv,
                              test_mode=os.environ.get("BIBI_WINDOW_TEST") == "1"):
             return  # 原生窗口已关闭,退出
         print("  (未检测到桌面窗口组件,改用浏览器模式)")
