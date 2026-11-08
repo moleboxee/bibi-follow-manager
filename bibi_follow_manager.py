@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "2.7.0"
+APP_VER = "2.8.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -90,7 +90,7 @@ QRCODE_JS_B64 = "Ly8tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0
 QRCODE_JS = base64.b64decode(QRCODE_JS_B64).decode("utf-8") if QRCODE_JS_B64 else ""
 
 DEFAULT_SETTINGS = {"theme": "dark", "accent": "pink", "min_to_tray": False,
-                    "notify": True, "autostart": False,
+                    "notify": True, "autostart": False, "daily_limit": 300,
                     "batch_size": 10, "batch_delay": 1.0}
 
 
@@ -127,6 +127,10 @@ class Bili:
             self.settings["min_to_tray"] = bool(s.get("min_to_tray", False))
             self.settings["notify"] = bool(s.get("notify", True))
             self.settings["autostart"] = bool(s.get("autostart", False))
+            try:
+                self.settings["daily_limit"] = min(10000, max(0, int(s.get("daily_limit", 300))))
+            except (TypeError, ValueError):
+                pass
             try:
                 self.settings["batch_size"] = min(50, max(1, int(s.get("batch_size", 10))))
             except (TypeError, ValueError):
@@ -1005,6 +1009,11 @@ class Handler(BaseHTTPRequestHandler):
                 if want != _autostart_enabled():
                     _autostart(want)
                 bili.settings["autostart"] = want
+            if "daily_limit" in b:
+                try:
+                    bili.settings["daily_limit"] = min(10000, max(0, int(b["daily_limit"])))
+                except (TypeError, ValueError):
+                    raise BiliError("每日预算需为 0-10000 的整数(0=不限)")
             if "batch_size" in b:
                 try:
                     bili.settings["batch_size"] = min(50, max(1, int(b["batch_size"])))
@@ -1090,6 +1099,18 @@ class Handler(BaseHTTPRequestHandler):
                     "ops": load_json(OPS_FILE, {}),
                     "history": load_json(HISTORY_FILE, []),
                     "activity": load_json(ACTIVITY_FILE, {})}
+
+        if method == "POST" and path == "/api/clear_cache":
+            removed = []
+            for f, name in ((ACTIVITY_FILE, "活跃度缓存"), (HISTORY_FILE, "历史趋势"),
+                            (CACHE_FILE, "离线列表缓存")):
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                        removed.append(name)
+                    except OSError:
+                        pass
+            return {"removed": removed}
 
         if method == "POST" and path == "/api/restore":
             data = b.get("data") or {}
@@ -1599,6 +1620,16 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
               <option value="3">3 秒</option>
             </select>
           </div>
+          <div class="set-row">
+            <label>每日取关预算</label>
+            <select id="setDaily">
+              <option value="100">100 人</option>
+              <option value="200">200 人</option>
+              <option value="300">300 人</option>
+              <option value="500">500 人</option>
+              <option value="0">不限(不推荐)</option>
+            </select>
+          </div>
           <div class="hint">B站对频繁的取关/关注操作有风控(错误码 -412)。建议保持默认;若触发风控,程序会自动暂停剩余操作,等待几小时后再试。</div>
           <button id="btnSaveSet" class="primary">保存设置</button>
           <h3>关于</h3>
@@ -1612,6 +1643,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
             <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
               <button class="ghost" onclick="showOpsLog()">查看操作日志</button>
               <button class="ghost" onclick="openFolder()">打开数据文件夹</button>
+              <button class="ghost" onclick="clearCacheData()">清空缓存数据</button>
               <button class="ghost" onclick="exportBackup()">导出备份</button>
               <button class="ghost" onclick="document.getElementById('restoreFile').click()">恢复备份</button>
               <input type="file" id="restoreFile" accept=".json" class="hidden" onchange="restoreBackup(this)">
@@ -2295,6 +2327,20 @@ function restoreBackup(input){
   };
   reader.readAsText(file);
 }
+function clearCacheData(){
+  showModal('清空缓存数据',
+    '将删除:<b>活跃度缓存、历史趋势、离线列表缓存</b>。<br>' +
+    '<span style="color:var(--muted)">不影响:登录凭据、快照(变化报告)、操作日志、你的设置。</span>', [
+    {label: '取消'},
+    {label: '清空', cls: 'danger', onClick: async () => {
+      try{
+        const r = await api('/api/clear_cache', {}, 'POST');
+        state.lastActive = {}; saveLastActive(); loadHistory(); renderStats();
+        toast('已清空:' + (r.removed && r.removed.length ? r.removed.join('、') : '无可清理内容'), 'ok');
+      }catch(e){ toast(e.message, 'err'); }
+    }},
+  ]);
+}
 async function showOpsLog(){
   let entries = [];
   try{ entries = (await api('/api/opslog')).entries || []; }catch(e){}
@@ -2634,9 +2680,11 @@ async function unfollowSelected(){
     });
   }catch(e){}
   const budget = today + mids.length;
-  const budgetNote = budget > 300
-    ? '<br><span style="color:var(--danger)">⚠ 今日累计将取关 ' + budget + ' 人,超过建议值(300/天),大幅提高风控风险,建议分几天进行。</span>'
-    : '<br><span style="color:var(--muted)">今日累计取关 ' + budget + ' 人(建议每天不超过 300)。</span>';
+  const limit = parseInt(state.settings.daily_limit, 10) || 0;
+  const budgetNote = limit > 0 && budget > limit
+    ? '<br><span style="color:var(--danger)">⚠ 今日累计将取关 ' + budget + ' 人,超过你设置的预算(' + limit + '/天),大幅提高风控风险,建议分几天进行。</span>'
+    : '<br><span style="color:var(--muted)">今日累计取关 ' + budget + ' 人' +
+      (limit > 0 ? '(预算 ' + limit + '/天)' : '') + '。</span>';
   showModal('批量取关确认',
     '即将取消关注 <b style="color:var(--danger)">' + mids.length + '</b> 位用户,此操作无法批量撤销!<br><br>' +
     '<span style="color:var(--muted)">' + namesPreview(mids) + (mids.length > 8 ? ' 等' : '') + '</span>' +
@@ -2865,6 +2913,7 @@ function fillSettingsForm(){
   $('#setTray').value = state.settings.min_to_tray ? 'on' : 'off';
   $('#setNotify').value = state.settings.notify ? 'on' : 'off';
   $('#setAuto').value = state.settings.autostart ? 'on' : 'off';
+  $('#setDaily').value = String(state.settings.daily_limit);
   buildSwatches();
 }
 async function loadSettings(){
@@ -2882,6 +2931,7 @@ $('#btnSaveSet').onclick = async () => {
       min_to_tray: $('#setTray').value === 'on',
       notify: $('#setNotify').value === 'on',
       autostart: $('#setAuto').value === 'on',
+      daily_limit: $('#setDaily').value,
     }, 'POST'));
     applyTheme(); fillSettingsForm();
     toast('设置已保存' + (state.settings.min_to_tray ? ',关闭窗口将最小化到托盘' : ''), 'ok');
