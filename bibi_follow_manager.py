@@ -597,7 +597,9 @@ def load_relation_cache(key):
 def save_relation_cache(key, value):
     cached = load_json(CACHE_FILE, {})
     cached[key] = value
-    cached[key.replace("followings", "cached_at").replace("followers", "fans_cached_at")] = time.time()
+    ts_key = {"followings": "cached_at", "followers": "fans_cached_at"}.get(key)
+    if ts_key:
+        cached[ts_key] = time.time()
     save_json(CACHE_FILE, cached)
 CACHE_LOCK = threading.Lock()
 FAN_LOCK = threading.Lock()
@@ -1389,7 +1391,7 @@ main{flex:1; overflow-y:auto; padding:14px 16px 90px}
 .about{color:var(--muted); font-size:12.5px; line-height:1.8}
 
 /* 批量操作条 / 弹窗 / 提示 */
-#batchbar{position:fixed; left:50%; transform:translateX(-50%); bottom:18px; display:flex; gap:10px; align-items:center; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:10px 14px; box-shadow:0 8px 30px var(--shadow); z-index:50}
+#batchbar{position:fixed; left:50%; transform:translateX(-50%); bottom:18px; display:flex; flex-wrap:wrap; justify-content:center; gap:10px; align-items:center; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:10px 14px; box-shadow:0 8px 30px var(--shadow); z-index:50; max-width:94vw}
 #selCount{color:var(--accent2); font-weight:600}
 .dd{position:relative}
 .dd-menu{position:absolute; bottom:44px; left:0; min-width:170px; max-height:260px; overflow:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:6px; z-index:60}
@@ -1781,7 +1783,7 @@ function actLabel(u){
   const a = state.lastActive[u.mid];
   if (!a) return '';
   if (a.has_content === false)
-    return '<span class="b b-dead" title="检测于 ' + fmtDate(a.checked_at) + '">📡 无投稿无动态</span>';
+    return '<span class="b" title="检测于 ' + fmtDate(a.checked_at) + '">📡 无投稿无动态</span>';
   if (!a.last_ts)
     return '<span class="b" title="检测于 ' + fmtDate(a.checked_at) + '">📡 内容不可见</span>';
   const days = Math.floor((Date.now() / 1000 - a.last_ts) / 86400);
@@ -2209,7 +2211,7 @@ function applyPreset(){
   set('cdDays', p.days); set('cdInc', p.inc); set('cdExc', p.exc);
   set('cdActDays', p.actDays); set('cdActKnown', p.actKnown); set('cdCap', p.cap);
   if ($('#cdNoSig')) $('#cdNoSig').checked = !!p.nosig;
-  upd && upd();
+  updWizardCount();
   toast('已应用预设「' + name + '」', 'ok');
 }
 function savePreset(){
@@ -2246,6 +2248,11 @@ function restoreWizard(){
     set('cdActDays', w.actDays); set('cdActKnown', w.actKnown); set('cdCap', w.cap);
     if ($('#cdNoSig') && w.nosig != null) $('#cdNoSig').checked = !!w.nosig;
   }catch(e){}
+}
+function updWizardCount(){
+  const el = $('#cdCount');
+  if (el) el.textContent = condMatch().length;
+  saveWizard();
 }
 function condModal(){
   if (state.view2 === 'fans') switchView('follows');
@@ -2287,7 +2294,7 @@ function condModal(){
       toast('已勾选 ' + n + ' 人,请核对后点「批量取关」', 'ok');
     }},
   ]);
-  const upd = () => { const el = $('#cdCount'); if (el) el.textContent = condMatch().length; saveWizard(); };
+  const upd = updWizardCount;
   $('#modalBody').addEventListener('input', upd);
   $('#modalBody').addEventListener('change', upd);
   buildPresetSelect();
@@ -2567,9 +2574,9 @@ function invertSel(){
 }
 function clearSel(){ state.sel.clear(); renderGrid(); }
 function updateBatchBar(){
-  const n = state.sel.size;
-  $('#batchbar').classList.toggle('hidden', n === 0);
-  $('#selCount').textContent = '已选 ' + n + ' 人';
+  const hide = state.sel.size === 0 || state.view2 === 'settings' || state.view2 === 'help';
+  $('#batchbar').classList.toggle('hidden', hide);
+  $('#selCount').textContent = '已选 ' + state.sel.size + ' 人';
 }
 
 /* ===================== 批量操作 ===================== */
@@ -2637,6 +2644,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape'){
     if (!$('#modalMask').classList.contains('hidden')) closeModal();
     document.querySelectorAll('.dd-menu').forEach(m => m.classList.add('hidden'));
+    const cm = $('#ctxMenu'); if (cm) cm.classList.add('hidden');
   }
   const tag = ((document.activeElement || {}).tagName || '').toUpperCase();
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -2845,6 +2853,10 @@ function ctxAct(act, mid){
     ]);
   }
 }
+document.addEventListener('click', () => {
+  const m = $('#ctxMenu');
+  if (m) m.classList.add('hidden');
+});
 document.addEventListener('contextmenu', e => {
   const card = e.target.closest('#grid .card');
   const menu = $('#ctxMenu');
@@ -3224,7 +3236,8 @@ def try_native_window(url, srv=None, test_mode=False):
         if test_mode:
             threading.Timer(4.0, win.destroy).start()
         else:
-            STATE["tray"] = _setup_tray(win, show_main)
+            if srv is not None:  # 第二实例(只开窗不开服务)不再重复托盘图标
+                STATE["tray"] = _setup_tray(win, show_main)
             threading.Timer(2.0, apply_titlebar_theme).start()
         webview.start()
         return True
