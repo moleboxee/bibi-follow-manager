@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "2.0.0"
+APP_VER = "2.1.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -120,6 +120,8 @@ class Bili:
             self.cookies = data.get("cookies", {}) or {}
             s = data.get("settings", {}) or {}
             self.settings["theme"] = s.get("theme", "dark")
+            if self.settings["theme"] not in ("dark", "light", "auto"):
+                self.settings["theme"] = "dark"
             self.settings["accent"] = s.get("accent", "pink")
             self.settings["min_to_tray"] = bool(s.get("min_to_tray", False))
             self.settings["notify"] = bool(s.get("notify", True))
@@ -929,7 +931,7 @@ class Handler(BaseHTTPRequestHandler):
             return dict(bili.settings)
 
         if method == "POST" and path == "/api/settings":
-            if "theme" in b and b["theme"] in ("dark", "light"):
+            if "theme" in b and b["theme"] in ("dark", "light", "auto"):
                 bili.settings["theme"] = b["theme"]
             if "accent" in b and b["accent"] in ("pink", "blue", "green", "purple"):
                 bili.settings["accent"] = b["accent"]
@@ -1421,6 +1423,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
             <select id="setTheme">
               <option value="dark">深色</option>
               <option value="light">浅色</option>
+              <option value="auto">跟随系统</option>
             </select>
           </div>
           <div class="set-row">
@@ -1503,6 +1506,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
   <button id="btnUnfollow" class="danger" onclick="unfollowSelected()">批量取关</button>
   <button id="btnFollowBack" class="primary hidden" onclick="followBackSelected()">批量回关</button>
   <button id="btnCheckActive" class="hidden" onclick="checkActiveSelected()" title="逐个查询选中用户的最后投稿时间(约1秒/人)">检测活跃度</button>
+  <button id="btnProtect" class="hidden" onclick="toggleProtectSelected()" title="保护名单:勾选后点此,全选/向导/批量取关都会跳过这些用户">🔒 保护</button>
   <button class="ghost" onclick="exportSel()">导出选中</button>
   <button class="ghost" onclick="clearSel()">取消选择</button>
 </div>
@@ -1583,12 +1587,30 @@ const state = {
   lastActive: {},            // mid -> {last_ts, checked_at}
   changeReport: {follows: null, fans: null},
   sel: new Set(),
+  protect: new Set(),        // 保护名单:批量勾选/向导/取关全链路跳过
   view: 'all', fanView: 'all',
   filters: {q:'', rel:'all', special:'all', group:'all', dead:'all', sort:'mtime_desc'},
   fanFilters: {q:'', rel:'all', dead:'all', sort:'mtime_desc'},
 };
 let fansTimer = null, qrTimer = null, pollToken = 0, fanToken = 0;
 try{ state.lastActive = JSON.parse(localStorage.getItem('bibi_lastActive') || '{}') || {}; }catch(e){ state.lastActive = {}; }
+try{ state.protect = new Set(JSON.parse(localStorage.getItem('bibi_protect') || '[]')); }catch(e){ state.protect = new Set(); }
+function saveProtect(){
+  try{ localStorage.setItem('bibi_protect', JSON.stringify([...state.protect])); }catch(e){}
+}
+function toggleProtectSelected(){
+  const mids = [...state.sel];
+  if (!mids.length) return toast('请先勾选用户', 'err');
+  const allProt = mids.every(m => state.protect.has(m));
+  if (allProt){
+    mids.forEach(m => state.protect.delete(m));
+    toast('已取消保护 ' + mids.length + ' 人', 'ok');
+  } else {
+    mids.forEach(m => state.protect.add(m));
+    toast('🔒 已保护 ' + mids.length + ' 人:全选/向导/批量取关都会跳过他们', 'ok');
+  }
+  saveProtect(); renderGrid();
+}
 function saveLastActive(){
   try{ localStorage.setItem('bibi_lastActive', JSON.stringify(state.lastActive)); }catch(e){}
 }
@@ -1656,6 +1678,7 @@ function switchView(v){
   $('#btnUnfollow').classList.toggle('hidden', isF);
   $('#btnFollowBack').classList.toggle('hidden', !isF);
   $('#btnCheckActive').classList.toggle('hidden', isF);
+  $('#btnProtect').classList.toggle('hidden', isF);
   $('#tagSection').classList.toggle('hidden', isF);
   $('#q').value = isF ? state.fanFilters.q : state.filters.q;
   if (v === 'follows'){ renderSidebar(); renderGrid(); }
@@ -1946,6 +1969,7 @@ function condMatch(){
   const actKnown = $('#cdActKnown') ? $('#cdActKnown').value : 'all';
   const cut = Date.now() / 1000 - day * 86400;
   let arr = state.list.filter(u => {
+    if (state.protect.has(u.mid)) return false;  // 保护名单不参与向导勾选
     const mutual = isMutual(u);
     if (rel === 'oneway' && mutual) return false;
     if (rel === 'mutual' && !mutual) return false;
@@ -2197,6 +2221,7 @@ function cardHTML(u, isFan){
   if (isFan){
     badges += back ? '<span class="b b-ok">已回关</span>' : '<span class="b b-warn">未回关</span>';
   } else {
+    if (state.protect.has(u.mid)) badges += '<span class="b b-ok" title="保护名单:批量勾选/向导/取关会跳过">🔒 已保护</span>';
     badges += isMutual(u) ? '<span class="b b-ok">互粉</span>' : '<span class="b">单向</span>';
     if (u.special === 1) badges += '<span class="b b-sp">特别</span>';
     badges += tagsNames(u.mid).map(t => '<span class="b b-tag">' + esc(t) + '</span>').join('');
@@ -2263,9 +2288,9 @@ function selChange(mid, on){
   updateBatchBar();
 }
 function currentList(){ return state.view2 === 'fans' ? filteredFans() : filteredList(); }
-function selectAllVisible(){ currentList().forEach(u => state.sel.add(u.mid)); renderGrid(); }
+function selectAllVisible(){ currentList().forEach(u => { if (!state.protect.has(u.mid)) state.sel.add(u.mid); }); renderGrid(); }
 function invertSel(){
-  currentList().forEach(m => { const mid = m.mid; if (state.sel.has(mid)) state.sel.delete(mid); else state.sel.add(mid); });
+  currentList().forEach(m => { const mid = m.mid; if (state.protect.has(mid)) return; if (state.sel.has(mid)) state.sel.delete(mid); else state.sel.add(mid); });
   renderGrid();
 }
 function clearSel(){ state.sel.clear(); renderGrid(); }
@@ -2416,8 +2441,14 @@ async function batchWrite(path, mids, verb, applyOk){
   showModal(verb + '完成', html, [{label: '关闭'}]);
 }
 async function unfollowSelected(){
-  const mids = [...state.sel];
+  let mids = [...state.sel];
   if (!mids.length) return;
+  const prot = mids.filter(m => state.protect.has(m));
+  if (prot.length){
+    mids = mids.filter(m => !state.protect.has(m));
+    toast('已自动移除 ' + prot.length + ' 位保护名单用户', 'ok');
+  }
+  if (!mids.length) return toast('所选用户都在保护名单中', 'err');
   const nMutual = mids.filter(m => {
     const u = state.list.find(x => x.mid === m);
     return u && isMutual(u);
@@ -2581,7 +2612,17 @@ function exportSel(){
 
 /* ===================== 设置 ===================== */
 function applyTheme(){
-  document.body.classList.toggle('light', state.settings.theme === 'light');
+  const t = state.settings.theme;
+  const dark = t === 'dark' || (t === 'auto' && window.matchMedia
+    && window.matchMedia('(prefers-color-scheme: light)').matches === false);
+  document.body.classList.toggle('light', !dark);
+}
+if (window.matchMedia){
+  try{
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+      if (state.settings.theme === 'auto') applyTheme();
+    });
+  }catch(e){}
 }
 function fillSettingsForm(){
   $('#setTheme').value = state.settings.theme;
