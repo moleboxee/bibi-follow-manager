@@ -326,7 +326,7 @@ class Bili:
     def _fetch_all_relation(self, url, mid, progress_cb=None):
         out, pn, ps = [], 1, 50
         total = 0
-        while pn <= 100:  # 保护上限(100页×50=5000)
+        while pn <= 400:  # 保护上限(400页×50=2万人)
             lst, total = self._relation_page(url, mid, pn, ps)
             for u in lst:
                 out.append(self._trim_user(u, is_follower=(url == URL_FOLLOWERS)))
@@ -335,7 +335,7 @@ class Bili:
             if not lst or len(lst) < ps or (total and len(out) >= total):
                 break
             pn += 1
-            time.sleep(0.3)
+            time.sleep(0.25)
         return out, total or len(out)
 
     def fetch_all_followings(self, mid, progress_cb=None):
@@ -368,7 +368,7 @@ class Bili:
         members, pn, ps = [], 1, 50
         count = tag.get("count", 0)
         seen = set()
-        while len(seen) < count and pn <= 60:
+        while len(seen) < count and pn <= 100:
             lst = self.tag_users_page(tag["tagid"], pn, ps)
             if not lst:
                 break
