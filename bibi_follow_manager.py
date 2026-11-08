@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "2.2.0"
+APP_VER = "2.3.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -58,6 +58,7 @@ SNAPSHOT_FILE = os.path.join(ROOT, "bibi_snapshot.json")
 OPS_FILE = os.path.join(ROOT, "bibi_ops.json")
 HISTORY_FILE = os.path.join(ROOT, "bibi_history.json")
 ACTIVITY_FILE = os.path.join(ROOT, "bibi_activity.json")
+CACHE_FILE = os.path.join(ROOT, "bibi_cache.json")
 START_PORT = 8410
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -565,6 +566,8 @@ CACHE = {
     "error": "",
     "needLogin": False,
     "diff": None,
+    "stale": False,
+    "cached_at": 0,
     "ts": 0,
 }
 FAN_CACHE = {
@@ -575,15 +578,30 @@ FAN_CACHE = {
     "error": "",
     "needLogin": False,
     "diff": None,
+    "stale": False,
+    "cached_at": 0,
     "ts": 0,
 }
+
+
+def load_relation_cache(key):
+    cached = load_json(CACHE_FILE, {})
+    val = cached.get(key)
+    return val if isinstance(val, list) and val else None
+
+
+def save_relation_cache(key, value):
+    cached = load_json(CACHE_FILE, {})
+    cached[key] = value
+    cached[key.replace("followings", "cached_at").replace("followers", "fans_cached_at")] = time.time()
+    save_json(CACHE_FILE, cached)
 CACHE_LOCK = threading.Lock()
 FAN_LOCK = threading.Lock()
 
 
 def rebuild_cache(bili):
     with CACHE_LOCK:
-        CACHE.update(status="loading", error="", needLogin=False,
+        CACHE.update(status="loading", error="", needLogin=False, stale=False,
                      followings=[], tags=[], tagMembers={}, done=0, total=0)
     try:
         mid = bili.mid()
@@ -592,7 +610,24 @@ def rebuild_cache(bili):
             with CACHE_LOCK:
                 CACHE["done"], CACHE["total"] = done, total
 
-        lst, total = bili.fetch_all_followings(mid, cb)
+        try:
+            lst, total = bili.fetch_all_followings(mid, cb)
+        except BiliError as e:
+            # 拉取失败(风控/网络):回退本地缓存数据,保证程序仍可用
+            cached = load_relation_cache("followings")
+            if not cached:
+                raise
+            cached_at = (load_json(CACHE_FILE, {}).get("cached_at") or 0)
+            with CACHE_LOCK:
+                CACHE.update(status="ok", stale=True, cached_at=cached_at,
+                             followings=cached, total=len(cached), done=len(cached),
+                             tags=load_json(CACHE_FILE, {}).get("tags") or [],
+                             tagMembers=load_json(CACHE_FILE, {}).get("tagMembers") or {},
+                             diff=None, error="",
+                             needLogin=False)
+                CACHE["error"] = "本次刷新失败(%s),已回退本地缓存数据" % e
+            return
+
         with CACHE_LOCK:
             CACHE["followings"] = lst
             CACHE["total"] = total
@@ -636,7 +671,11 @@ def rebuild_cache(bili):
             CACHE["tagMembers"] = {k: v for k, v in members.items()}
             CACHE["diff"] = diff
             CACHE["status"] = "ok"
+            CACHE["stale"] = False
+            CACHE["cached_at"] = time.time()
             CACHE["ts"] = time.time()
+        save_relation_cache("followings", lst)   # 全量字段,离线回退时徽章齐全
+        save_relation_cache("tags", clean)
     except BiliError as e:
         with CACHE_LOCK:
             CACHE["status"] = "error"
@@ -658,7 +697,7 @@ def start_rebuild(bili):
 
 def rebuild_fans(bili):
     with FAN_LOCK:
-        FAN_CACHE.update(status="loading", error="", needLogin=False,
+        FAN_CACHE.update(status="loading", error="", needLogin=False, stale=False,
                          followers=[], done=0, total=0)
     try:
         mid = bili.mid()
@@ -667,7 +706,20 @@ def rebuild_fans(bili):
             with FAN_LOCK:
                 FAN_CACHE["done"], FAN_CACHE["total"] = done, total
 
-        lst, total = bili.fetch_all_followers(mid, cb)
+        try:
+            lst, total = bili.fetch_all_followers(mid, cb)
+        except BiliError as e:
+            cached = load_relation_cache("followers")
+            if not cached:
+                raise
+            fans_cached_at = (load_json(CACHE_FILE, {}).get("fans_cached_at") or 0)
+            with FAN_LOCK:
+                FAN_CACHE.update(status="ok", stale=True, fans_cached_at=fans_cached_at,
+                                 followers=cached, total=len(cached), done=len(cached),
+                                 diff=None, error="", needLogin=False)
+                FAN_CACHE["error"] = "粉丝刷新失败(%s),已回退本地缓存数据" % e
+            return
+
         # 快照对比(新增粉丝 / 取关你的粉丝)
         snap = load_json(SNAPSHOT_FILE, {})
         if isinstance(snap.get("followers"), list):
@@ -681,7 +733,10 @@ def rebuild_fans(bili):
             FAN_CACHE["total"] = total
             FAN_CACHE["diff"] = fdiff
             FAN_CACHE["status"] = "ok"
+            FAN_CACHE["stale"] = False
+            FAN_CACHE["fans_cached_at"] = time.time()
             FAN_CACHE["ts"] = time.time()
+        save_relation_cache("followers", lst)
     except BiliError as e:
         with FAN_LOCK:
             FAN_CACHE["status"] = "error"
@@ -704,10 +759,12 @@ def start_fans_rebuild(bili):
 def reset_caches():
     with CACHE_LOCK:
         CACHE.update(status="idle", followings=[], tags=[], tagMembers={},
-                     done=0, total=0, error="", needLogin=False, diff=None)
+                     done=0, total=0, error="", needLogin=False, diff=None,
+                     stale=False, cached_at=0)
     with FAN_LOCK:
         FAN_CACHE.update(status="idle", followers=[],
-                         done=0, total=0, error="", needLogin=False, diff=None)
+                         done=0, total=0, error="", needLogin=False, diff=None,
+                         stale=False, fans_cached_at=0)
 
 
 # ---------- 更新检查 ----------
@@ -998,7 +1055,9 @@ class Handler(BaseHTTPRequestHandler):
             with CACHE_LOCK:
                 snap = {"status": CACHE["status"], "done": CACHE["done"],
                         "total": CACHE["total"], "error": CACHE["error"],
-                        "needLogin": CACHE["needLogin"], "ts": CACHE["ts"]}
+                        "needLogin": CACHE["needLogin"], "ts": CACHE["ts"],
+                        "stale": CACHE.get("stale", False),
+                        "cached_at": CACHE.get("cached_at", 0)}
                 if CACHE["status"] == "ok":
                     snap["followings"] = CACHE["followings"]
                     snap["tags"] = CACHE["tags"]
@@ -1016,11 +1075,42 @@ class Handler(BaseHTTPRequestHandler):
             with FAN_LOCK:
                 snap = {"status": FAN_CACHE["status"], "done": FAN_CACHE["done"],
                         "total": FAN_CACHE["total"], "error": FAN_CACHE["error"],
-                        "needLogin": FAN_CACHE["needLogin"], "ts": FAN_CACHE["ts"]}
+                        "needLogin": FAN_CACHE["needLogin"], "ts": FAN_CACHE["ts"],
+                        "stale": FAN_CACHE.get("stale", False),
+                        "fans_cached_at": FAN_CACHE.get("fans_cached_at", 0)}
                 if FAN_CACHE["status"] == "ok":
                     snap["followers"] = FAN_CACHE["followers"]
                     snap["diff"] = FAN_CACHE.get("diff")
             return snap
+
+        if method == "GET" and path == "/api/backup":
+            return {"ver": APP_VER, "exported_at": time.time(),
+                    "settings": dict(bili.settings),
+                    "snapshot": load_json(SNAPSHOT_FILE, {}),
+                    "ops": load_json(OPS_FILE, {}),
+                    "history": load_json(HISTORY_FILE, []),
+                    "activity": load_json(ACTIVITY_FILE, {})}
+
+        if method == "POST" and path == "/api/restore":
+            data = b.get("data") or {}
+            if not isinstance(data, dict) or not data.get("ver"):
+                raise BiliError("备份文件格式不正确")
+            if isinstance(data.get("settings"), dict):
+                for k, v in data["settings"].items():
+                    if k in DEFAULT_SETTINGS:
+                        bili.settings[k] = v
+                bili.settings["autostart"] = _autostart_enabled()
+                bili.save()
+            if isinstance(data.get("snapshot"), dict):
+                save_json(SNAPSHOT_FILE, data["snapshot"])
+            if isinstance(data.get("ops"), dict):
+                save_json(OPS_FILE, data["ops"])
+            if isinstance(data.get("history"), list):
+                save_json(HISTORY_FILE, data["history"])
+            if isinstance(data.get("activity"), dict):
+                save_json(ACTIVITY_FILE, data["activity"])
+            reset_caches()
+            return {"restored": True}
 
         if method == "GET" and path == "/api/opslog":
             return {"entries": load_json(OPS_FILE, {"entries": []}).get("entries", [])[:50]}
@@ -1492,6 +1582,9 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
             <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
               <button class="ghost" onclick="showOpsLog()">查看操作日志</button>
               <button class="ghost" onclick="openFolder()">打开数据文件夹</button>
+              <button class="ghost" onclick="exportBackup()">导出备份</button>
+              <button class="ghost" onclick="document.getElementById('restoreFile').click()">恢复备份</button>
+              <input type="file" id="restoreFile" accept=".json" class="hidden" onchange="restoreBackup(this)">
             </div>
           </div>
         </div>
@@ -1780,7 +1873,12 @@ async function startLoad(refresh){
       rebuildMemberOf();
       state.sel.clear();
       renderSidebar(); renderGrid(); renderStats(); renderChgBanner();
-      toast('加载完成:共 ' + state.list.length + ' 位关注', 'ok');
+      if (d.stale){
+        toast('⚠ 最新数据加载失败(' + (d.error || '风控/网络') + '),已显示本地缓存数据(截至 ' +
+          new Date((d.cached_at || 0) * 1000).toLocaleString('zh-CN') + '),操作仍可正常进行', 'err');
+      } else {
+        toast('加载完成:共 ' + state.list.length + ' 位关注', 'ok');
+      }
     } else {
       $('#loadInfo').textContent = '';
       if (d.needLogin){ showLogin(); return; }
@@ -2130,6 +2228,39 @@ document.addEventListener('click', e => {
     api('/api/settings', {accent: sw.dataset.a}, 'POST').catch(() => {});
   }
 });
+async function exportBackup(){
+  try{
+    const d = await api('/api/backup');
+    download('BIBI备份_' + stamp() + '.json',
+      JSON.stringify(d, null, 2), 'application/json');
+    toast('备份已导出(不含登录凭据,换机后需重新扫码)', 'ok');
+  }catch(e){ toast(e.message, 'err'); }
+}
+function restoreBackup(input){
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try{ data = JSON.parse(reader.result); }
+    catch(e){ return toast('备份文件解析失败', 'err'); }
+    if (!data || !data.ver) return toast('不是有效的备份文件', 'err');
+    showModal('恢复备份',
+      '将用备份文件覆盖本机的:快照、操作日志、历史趋势、活跃度缓存与外观/批量设置。<br>' +
+      '<b style="color:var(--warn)">登录凭据不在备份内,当前登录不受影响。</b><br>确定恢复?', [
+      {label: '取消'},
+      {label: '恢复', cls: 'primary', onClick: async () => {
+        try{
+          await api('/api/restore', {data}, 'POST');
+          toast('恢复完成,正在重新加载数据…', 'ok');
+          loadSettings(); loadStat(); loadHistory(); startLoad(true);
+        }catch(e){ toast(e.message, 'err'); }
+      }},
+    ]);
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
 async function showOpsLog(){
   let entries = [];
   try{ entries = (await api('/api/opslog')).entries || []; }catch(e){}
