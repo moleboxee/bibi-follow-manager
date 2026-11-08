@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "2.5.0"
+APP_VER = "2.7.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -1432,6 +1432,7 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
       <button data-v="follows" class="on" onclick="switchView('follows')">我的关注</button>
       <button data-v="fans" onclick="switchView('fans')">我的粉丝</button>
       <button data-v="settings" onclick="switchView('settings')">设置</button>
+      <button data-v="help" onclick="switchView('help')">帮助</button>
     </div>
     <div id="userChip">
       <img id="myFace" alt="">
@@ -1510,6 +1511,34 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
         </div>
         <div id="grid"></div>
         <div id="emptyBox" class="empty hidden"></div>
+      </div>
+      <div id="paneHelp" class="hidden">
+        <div class="set-card">
+          <h3>快速上手</h3>
+          <div class="about">扫码登录 → 点「刷新」加载列表 → 侧栏/向导筛选 → 勾选 → 批量操作。<br>
+          取关前建议先用「🔒 保护」锁定不想取关的账号;万级列表首次加载需 1-2 分钟。</div>
+          <h3>错误码对照</h3>
+          <div class="about" style="line-height:2">
+            <b>-101</b> 未登录 / Cookie 过期 → 重新扫码<br>
+            <b>-352</b> 风控/签名拦截 → 等 30 分钟~几小时再刷新(程序会自动补签重试)<br>
+            <b>-412</b> 风控 → 同上,操作过于频繁<br>
+            <b>-403</b> 签名校验失败 → 程序会自动补签重试<br>
+            <b>86038</b> 登录二维码过期 → 点「刷新二维码」
+          </div>
+          <h3>风控安全建议</h3>
+          <div class="about" style="line-height:2">
+            · 每天取关建议 ≤ 300 人(确认弹窗会显示今日累计)<br>
+            · 不要频繁全量刷新;数据已在本地缓存,加载一次用一天<br>
+            · 遇到 -352/-412 自动暂停属正常,等冷却即可,期间离线缓存数据仍可操作<br>
+            · 活跃度检测每用户 1 个请求,建议只检测向导筛出的候选池
+          </div>
+          <h3>数据与隐私</h3>
+          <div class="about" style="line-height:2">
+            · 所有数据(凭据/快照/日志/缓存)只存在本机程序目录,不上传任何服务器<br>
+            · 换机迁移:「设置→关于」导出备份 → 新机恢复 → 重新扫码<br>
+            · 程序只监听 127.0.0.1,并带 POST 令牌校验,其他网页无法操控
+          </div>
+        </div>
       </div>
       <div id="paneSettings" class="hidden">
         <div class="set-card">
@@ -1606,7 +1635,9 @@ footer{padding:8px 16px; color:var(--muted); font-size:11.5px; border-top:1px so
   <button id="btnFollowBack" class="primary hidden" onclick="followBackSelected()">批量回关</button>
   <button id="btnCheckActive" class="hidden" onclick="checkActiveSelected()" title="逐个查询选中用户的最后投稿/动态时间(约1秒/人)">检测活跃度</button>
   <button id="btnProtect" class="hidden" onclick="toggleProtectSelected()" title="保护名单:勾选后点此,全选/向导/批量取关都会跳过这些用户">🔒 保护</button>
-  <button class="ghost" onclick="exportSel()">导出选中</button>
+  <button class="ghost" onclick="copyUids()" title="把选中用户的UID逐行复制到剪贴板">📋 复制UID</button>
+  <button class="ghost" onclick="exportSel('csv')">导出选中CSV</button>
+  <button class="ghost" onclick="exportSel('json')">导出选中JSON</button>
   <button class="ghost" onclick="clearSel()">取消选择</button>
 </div>
 
@@ -1763,9 +1794,10 @@ function switchView(v){
   state.sel.clear();
   saveViewState();
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
-  $('aside').classList.toggle('hidden', v === 'settings');
+  $('aside').classList.toggle('hidden', v === 'settings' || v === 'help');
   $('#paneSettings').classList.toggle('hidden', v !== 'settings');
-  $('#paneList').classList.toggle('hidden', v === 'settings');
+  $('#paneHelp').classList.toggle('hidden', v !== 'help');
+  $('#paneList').classList.toggle('hidden', v === 'settings' || v === 'help');
   $('#stats').classList.toggle('hidden', v !== 'follows');
   const isF = v === 'fans';
   $('#selRel').classList.toggle('hidden', isF);
@@ -2021,7 +2053,7 @@ function renderChgBanner(){
   if (!el) return;
   const c = chgCounts();
   const total = c.fa + c.fr + c.rename + c.na + c.nr;
-  if (!total || state.view2 === 'settings'){ el.classList.add('hidden'); return; }
+  if (!total || state.view2 === 'settings' || state.view2 === 'help'){ el.classList.add('hidden'); return; }
   const parts = [];
   if (c.fa) parts.push('新增关注 <b>' + c.fa + '</b>');
   if (c.fr) parts.push('<b>不再关注 ' + c.fr + '</b>');
@@ -2793,11 +2825,23 @@ function exportFiltered(fmt){
     JSON.stringify({exported_at: new Date().toISOString(), count: arr.length, list: arr}, null, 2), 'application/json');
   else download('bilibili' + kind + '_' + stamp() + '.csv', toCSV(arr, isFan), 'text/csv');
 }
-function exportSel(){
+function copyUids(){
+  const mids = [...state.sel];
+  if (!mids.length) return toast('请先勾选用户', 'err');
+  copyText(mids.join('\n'));
+}
+function exportSel(fmt){
   const src = state.view2 === 'fans' ? state.fans : state.list;
   const arr = src.filter(u => state.sel.has(u.mid));
   if (!arr.length) return;
-  download('bilibili_选中_' + stamp() + '.csv', toCSV(arr, state.view2 === 'fans'), 'text/csv');
+  const isFan = state.view2 === 'fans';
+  if (fmt === 'json'){
+    download('bilibili_选中_' + stamp() + '.json',
+      JSON.stringify({exported_at: new Date().toISOString(), count: arr.length, list: arr}, null, 2),
+      'application/json');
+  } else {
+    download('bilibili_选中_' + stamp() + '.csv', toCSV(arr, isFan), 'text/csv');
+  }
 }
 
 /* ===================== 设置 ===================== */
