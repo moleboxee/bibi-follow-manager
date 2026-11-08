@@ -39,7 +39,7 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-APP_VER = "3.0.0"
+APP_VER = "3.1.0"
 if getattr(sys, "frozen", False):
     # PyInstaller 打包版:数据文件放 exe 同目录(便携);目录不可写则回退 %APPDATA%
     _ROOT = os.path.dirname(os.path.abspath(sys.executable))
@@ -1100,7 +1100,8 @@ class Handler(BaseHTTPRequestHandler):
                     "snapshot": load_json(SNAPSHOT_FILE, {}),
                     "ops": load_json(OPS_FILE, {}),
                     "history": load_json(HISTORY_FILE, []),
-                    "activity": load_json(ACTIVITY_FILE, {})}
+                    "activity": load_json(ACTIVITY_FILE, {}),
+                    "cache": load_json(CACHE_FILE, {})}
 
         if method == "POST" and path == "/api/clear_cache":
             removed = []
@@ -1132,11 +1133,13 @@ class Handler(BaseHTTPRequestHandler):
                 save_json(HISTORY_FILE, data["history"])
             if isinstance(data.get("activity"), dict):
                 save_json(ACTIVITY_FILE, data["activity"])
+            if isinstance(data.get("cache"), dict):
+                save_json(CACHE_FILE, data["cache"])
             reset_caches()
             return {"restored": True}
 
         if method == "GET" and path == "/api/opslog":
-            return {"entries": load_json(OPS_FILE, {"entries": []}).get("entries", [])[:50]}
+            return {"entries": load_json(OPS_FILE, {"entries": []}).get("entries", [])[:200]}
 
         if method == "GET" and path == "/api/history":
             return load_json(HISTORY_FILE, [])
@@ -1984,7 +1987,12 @@ async function startFans(refresh){
       state.changeReport.fans = d.diff || null;
       state.sel.clear();
       renderFanSidebar(); renderGrid(); renderStats(); renderChgBanner();
-      toast('加载完成:共 ' + state.fans.length + ' 位粉丝', 'ok');
+      if (d.stale){
+        toast('⚠ 粉丝最新数据加载失败(' + (d.error || '风控/网络') + '),已显示本地缓存数据(截至 ' +
+          new Date((d.fans_cached_at || 0) * 1000).toLocaleString('zh-CN') + ')', 'err');
+      } else {
+        toast('加载完成:共 ' + state.fans.length + ' 位粉丝', 'ok');
+      }
     } else {
       fansTimer = null;
       $('#loadInfo').textContent = '';
@@ -2356,6 +2364,12 @@ document.addEventListener('click', e => {
     api('/api/settings', {accent: sw.dataset.a}, 'POST').catch(() => {});
   }
 });
+async function openFolder(){
+  try{
+    await api('/api/open_folder', {}, 'POST');
+    toast('已在资源管理器中打开数据文件夹', 'ok');
+  }catch(e){ toast(e.message, 'err'); }
+}
 async function exportBackup(){
   try{
     const d = await api('/api/backup');
